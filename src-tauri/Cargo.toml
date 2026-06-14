@@ -1,0 +1,25 @@
+[package]
+name = "llm-wiki-app"
+version = "2.0.0"
+edition = "2021"
+description = "LLM Wiki Desktop App"
+
+[lib]
+name = "llm_wiki_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+llm-wiki-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["sync"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+duckdb = { version = "1", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

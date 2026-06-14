@@ -1,0 +1,42 @@
+[package]
+name = "llm-wiki-core"
+version = "2.0.0"
+edition = "2021"
+description = "LLM-driven personal knowledge management system — core library"
+
+[lib]
+name = "llm_wiki_core"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+jieba-rs = "0.7"
+duckdb = { version = "1", features = ["bundled"] }
+thiserror.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
+regex.workspace = true
+lazy_static.workspace = true
+fs2 = "0.4"
+quick-xml = "0.37"
+tar = "0.4"
+flate2 = "1"
+zip = "2"
+log.workspace = true
+env_logger = "0.11"
+duct = "0.13"
+sha2.workspace = true
+uuid.workspace = true
+mime_guess = "2"
+liteparse = { version = "2", default-features = false }
+base64 = "0.22"
+pollster = "0.4"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

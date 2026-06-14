@@ -1,0 +1,90 @@
+# llm-wiki Configuration
+# Copy to ~/.config/llm-wiki/wiki_config.yaml or ./wiki_config.yaml
+# API keys should use environment variables: ${DEEPSEEK_API_KEY}
+
+# ── LLM Model ──────────────────────────────────────────
+model:
+  # Provider: deepseek | openai | ollama | custom
+  provider: deepseek
+
+  # API key (recommended: use env var ${DEEPSEEK_API_KEY} instead of plaintext)
+  api_key: ""
+
+  # Base URL (auto-detected from provider if empty)
+  base_url: ""
+
+  # Model name
+  model: deepseek-v4-flash
+
+  # Sampling temperature (0.0 = deterministic, 1.0+ = creative)
+  temperature: 0.3
+
+  # Max output tokens
+  max_tokens: 32000
+
+  # Context window size (Ollama only)
+  num_ctx: 32768
+
+# ── Liteparse (PDF parsing) ────────────────────────────
+liteparse:
+  # OCR server URL for image-based PDFs (e.g., http://localhost:8080/ocr)
+  # Leave empty for text-only PDF extraction
+  ocr_server_url: ""
+
+  # OCR language (Tesseract format)
+  ocr_language: chi_sim+eng
+
+  # Enable OCR for text-sparse pages (requires ocr_server_url)
+  ocr_enabled: false
+
+  # Page rendering DPI
+  dpi: 200.0
+
+  # Max pages per document
+  max_pages: 1000
+
+  # Concurrent workers (0 = auto: CPU cores - 1)
+  num_workers: 0
+
+# ── Image Analysis (compile-time vision model) ──────────
+image_analysis:
+  enabled: false
+  api_provider: ""
+  api_url: ""
+  api_key: ""
+  api_model: ""
+  api_prompt: ""
+  ocr_fallback: true
+  ocr_min_chars: 800
+
+# ── Query Behavior ─────────────────────────────────────
+query:
+  # Enable LLM-powered answer synthesis
+  llm_synthesis: true
+
+  # Default output format: markdown | table | timeline | slides | json
+  default_format: markdown
+
+  # Max search results per query
+  max_results: 5
+
+  # Search streams to use: metadata,bm25,graph,ledger
+  search_streams: metadata,bm25,graph,ledger
+
+  # LLM query expansion
+  llm_query_expansion: false
+
+# ── OCR (image fallback) ──────────────────────────────
+ocr:
+  mode: api
+  backend: api
+  api_provider: ""
+  api_url: ""
+  api_key: ""
+  api_model: ""
+  api_prompt: "Convert the document to clean markdown format."
+  pdf_dpi: 200
+
+# ── Logging ────────────────────────────────────────────
+logging:
+  level: INFO

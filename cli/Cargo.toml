@@ -1,0 +1,17 @@
+[package]
+name = "llm-wiki-cli"
+version = "2.0.0"
+edition = "2021"
+description = "LLM Wiki CLI — personal knowledge base"
+
+[[bin]]
+name = "wiki"
+path = "src/main.rs"
+
+[dependencies]
+llm-wiki-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+serde.workspace = true
+chrono.workspace = true
+env_logger = "0.11"

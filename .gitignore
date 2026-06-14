@@ -1,0 +1,37 @@
+# Build artifacts
+/target/
+/dist/
+/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Wiki data (user content — never committed)
+.wiki/
+
+# Configuration files (contain API keys)
+wiki_config.yaml
+**/wiki_config.yaml
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# Tauri generated
+/src-tauri/icons/
+gen/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
