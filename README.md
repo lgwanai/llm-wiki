@@ -19,6 +19,16 @@ Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
 - **⚡ liteparse** — Native Rust PDF text extraction (OCR optional)
 - **🎨 Codex UI** — Dark theme, terminal green accents, JetBrains Mono, split panels
 
+## Screenshots
+
+| Main Window | Graph View |
+|:---:|:---:|
+| ![Main Window](snapshot/main-window.png) | ![Graph View](snapshot/graph-view.png) |
+
+| Chat & Search | Settings |
+|:---:|:---:|
+| ![Chat View](snapshot/chat-view.png) | ![Settings](snapshot/settings-window.png) |
+
 ## Quick Start
 
 ### Install
