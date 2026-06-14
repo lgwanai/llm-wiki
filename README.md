@@ -1,10 +1,10 @@
 # llm-wiki
 
-<p align="center">
-  <img src="src-tauri/icons/icon.png" width="128" alt="llm-wiki" />
-</p>
+# llm-wiki
 
 **Personal Knowledge Base powered by LLMs** — 100% Rust.  
+
+Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
 
 Compile documents into structured wiki pages with knowledge graph linking.  
 Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
