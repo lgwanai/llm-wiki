@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="snapshot/main-window.png" width="720" alt="llm-wiki" />
+  <img src="src-tauri/icons/icon.png" width="96" alt="llm-wiki" />
 </p>
 
 # llm-wiki

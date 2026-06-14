@@ -27,8 +27,15 @@ wiki_config.yaml
 # Logs
 *.log
 
-# Tauri generated
-/src-tauri/icons/
+# Tauri generated icons (except source icon.png)
+/src-tauri/icons/32x32.png
+/src-tauri/icons/128x128.png
+/src-tauri/icons/128x128@2x.png
+/src-tauri/icons/64x64.png
+/src-tauri/icons/icon.icns
+/src-tauri/icons/icon.ico
+/src-tauri/icons/*.png
+!/src-tauri/icons/icon.png
 gen/
 
 # Python
