@@ -1,10 +1,10 @@
-# llm-wiki
+<p align="center">
+  <img src="snapshot/main-window.png" width="720" alt="llm-wiki" />
+</p>
 
 # llm-wiki
 
 **Personal Knowledge Base powered by LLMs** — 100% Rust.  
-
-Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
 
 Compile documents into structured wiki pages with knowledge graph linking.  
 Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
@@ -21,13 +21,9 @@ Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
 
 ## Screenshots
 
-| Main Window | Graph View |
-|:---:|:---:|
-| ![Main Window](snapshot/main-window.png) | ![Graph View](snapshot/graph-view.png) |
-
-| Chat & Search | Settings |
-|:---:|:---:|
-| ![Chat View](snapshot/chat-view.png) | ![Settings](snapshot/settings-window.png) |
+| Graph View | Chat & Search | Settings |
+|:---:|:---:|:---:|
+| ![Graph](snapshot/graph-view.png) | ![Chat](snapshot/chat-view.png) | ![Settings](snapshot/settings-window.png) |
 
 ## Quick Start
 
