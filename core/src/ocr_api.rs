@@ -15,7 +15,8 @@ pub fn analyze_image(path: &Path, config: &ImageAnalysisConfig) -> WikiResult<St
     let data_uri = format!("data:{mime};base64,{encoded}");
 
     let prompt = if config.api_prompt.is_empty() {
-        "Describe this image in detail. Extract all visible text, structure, and key information.".to_string()
+        "Describe this image in detail. Extract all visible text, structure, and key information."
+            .to_string()
     } else {
         config.api_prompt.clone()
     };
@@ -43,8 +44,12 @@ pub fn analyze_image(path: &Path, config: &ImageAnalysisConfig) -> WikiResult<St
         .build()?;
 
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("application/json"));
-    if let Ok(auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", config.api_key)) {
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    if let Ok(auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", config.api_key))
+    {
         headers.insert(reqwest::header::AUTHORIZATION, auth);
     }
 
@@ -95,14 +100,24 @@ pub fn ocr_image(path: &Path) -> WikiResult<String> {
             .build()?;
 
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         if !ocr_config.api_key.is_empty() {
-            if let Ok(auth) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", ocr_config.api_key)) {
+            if let Ok(auth) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", ocr_config.api_key))
+            {
                 headers.insert(reqwest::header::AUTHORIZATION, auth);
             }
         }
 
-        let resp: serde_json::Value = client.post(&api_url).headers(headers).json(&payload).send()?.json()?;
+        let resp: serde_json::Value = client
+            .post(&api_url)
+            .headers(headers)
+            .json(&payload)
+            .send()?
+            .json()?;
         let content = resp["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| WikiError::Ocr("Empty OCR API response".into()))?;

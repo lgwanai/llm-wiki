@@ -27,8 +27,13 @@ fn html2md(html: &str) -> String {
     text = re_tag.replace_all(&text, " ").to_string();
 
     // Decode entities
-    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ");
+    text = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
 
     // Clean up whitespace
     let re_ws = regex::Regex::new(r"\n{3,}").unwrap();

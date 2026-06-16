@@ -42,7 +42,9 @@ pub fn clean_orphans(dry_run: bool) -> WikiResult<Vec<LintIssue>> {
             if let Some(ref id) = orphan.entity_id {
                 for subdir in &["concepts", "entities"] {
                     let path = get_pages_dir().join(subdir).join(format!("{id}.md"));
-                    if path.exists() { let _ = std::fs::remove_file(&path); }
+                    if path.exists() {
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
             }
         }

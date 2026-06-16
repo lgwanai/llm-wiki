@@ -27,14 +27,14 @@ model:
 
 # ── Liteparse (PDF parsing) ────────────────────────────
 liteparse:
-  # OCR server URL for image-based PDFs (e.g., http://localhost:8080/ocr)
-  # Leave empty for text-only PDF extraction
+  # Advanced: liteparse-compatible external OCR endpoint.
+  # Leave empty to use the local OCR engine configured in the `ocr` section.
   ocr_server_url: ""
 
   # OCR language (Tesseract format)
   ocr_language: chi_sim+eng
 
-  # Enable OCR for text-sparse pages (requires ocr_server_url)
+  # Enable OCR for text-sparse pages and embedded images.
   ocr_enabled: false
 
   # Page rendering DPI
@@ -74,10 +74,33 @@ query:
   # LLM query expansion
   llm_query_expansion: false
 
-# ── OCR (image fallback) ──────────────────────────────
+# ── OCR (local model runtime) ─────────────────────────
 ocr:
-  mode: api
-  backend: api
+  # Local OCR is the default for PDF OCR. The app/CLI prepares the runtime
+  # and downloads model weights on first use.
+  mode: local
+  backend: paddleocr
+
+  # OCR engine: paddleocr | paddleocr-vl | mineru | deepseek-ocr
+  # paddleocr-vl uses MLX on macOS; paddleocr, mineru and deepseek-ocr are
+  # local Python model runtimes that return text boxes/polygons.
+  engine: paddleocr-vl
+
+  # Model name or absolute model directory.
+  # Examples: PaddleOCR-VL-1.5-8bit | MinerU2.5 | DeepSeek-OCR-2
+  model: PaddleOCR-VL-1.5-8bit
+
+  # Root directory containing OCR model folders.
+  # Leave empty to use the current wiki's .wiki/models/ocr directory.
+  model_root: ""
+
+  # Device: auto | cpu | cuda | mps
+  device: auto
+
+  # Allow runtime/model setup under .wiki/runtime and .wiki/models.
+  auto_download: true
+
+  # Legacy/API image OCR fields retained for image fallback workflows.
   api_provider: ""
   api_url: ""
   api_key: ""

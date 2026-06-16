@@ -36,6 +36,10 @@ pub enum Commands {
         /// Validate configuration and exit
         #[arg(long)]
         check: bool,
+
+        /// Set config value with dotted key syntax, e.g. --set ocr.engine=paddleocr
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
     },
 
     /// Compile source file/directory to wiki pages
@@ -127,6 +131,12 @@ pub enum Commands {
     Ledger {
         #[command(subcommand)]
         cmd: LedgerCmd,
+    },
+
+    /// View and query extracted markdown tables
+    Table {
+        #[command(subcommand)]
+        cmd: TableCmd,
     },
 
     /// Consolidate memory tiers and apply retention decay
@@ -342,5 +352,28 @@ pub enum LedgerCmd {
         /// Output CSV path
         #[arg(short = 'o', long)]
         output: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TableCmd {
+    /// List all extracted markdown tables
+    List,
+    /// Show table content (from markdown extraction)
+    Show {
+        /// Table name
+        table: String,
+    },
+    /// Query a table with natural language
+    Ask {
+        /// Table name
+        table: String,
+        /// Natural language question
+        question: String,
+    },
+    /// Get table schema
+    Schema {
+        /// Table name
+        table: String,
     },
 }

@@ -27,7 +27,8 @@ pub fn package_zip(source_dir: &Path, output: &Path) -> WikiResult<()> {
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
     add_dir_to_zip(&mut zip, source_dir, source_dir, options)?;
-    zip.finish().map_err(|e| crate::error::WikiError::Internal(format!("zip: {e}")))?;
+    zip.finish()
+        .map_err(|e| crate::error::WikiError::Internal(format!("zip: {e}")))?;
     Ok(())
 }
 
@@ -43,7 +44,10 @@ fn add_dir_to_zip(
         let name = path.strip_prefix(base).unwrap_or(&path);
 
         if path.is_dir() {
-            if path.file_name().map_or(false, |n| n == ".git" || n == "target") {
+            if path
+                .file_name()
+                .map_or(false, |n| n == ".git" || n == "target")
+            {
                 continue;
             }
             zip.add_directory(name.to_string_lossy(), options)
@@ -66,7 +70,9 @@ pub fn scan_secrets(dir: &Path) -> Vec<(String, String, String)> {
         !n.starts_with('.') && n != "target" && n != "node_modules"
     });
     for entry in walker.filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() { continue; }
+        if !entry.file_type().is_file() {
+            continue;
+        }
         if let Ok(content) = fs::read_to_string(entry.path()) {
             for (pattern, label) in SECRET_PATTERNS {
                 if let Ok(re) = regex::Regex::new(pattern) {

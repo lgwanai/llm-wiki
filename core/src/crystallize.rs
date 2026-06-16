@@ -15,8 +15,13 @@ pub fn extract_facts(content: &str) -> WikiResult<serde_json::Value> {
     let json_str = if let Some(start) = response.find('{') {
         if let Some(end) = response.rfind('}') {
             &response[start..=end]
-        } else { &response }
-    } else { &response };
+        } else {
+            &response
+        }
+    } else {
+        &response
+    };
 
-    serde_json::from_str(json_str).map_err(|e| crate::error::WikiError::Parse(format!("JSON parse: {e}")))
+    serde_json::from_str(json_str)
+        .map_err(|e| crate::error::WikiError::Parse(format!("JSON parse: {e}")))
 }

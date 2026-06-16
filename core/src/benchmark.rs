@@ -10,10 +10,14 @@ pub fn benchmark_retrieval(file: &str, top_k: usize) -> WikiResult<serde_json::V
     let mut mrr_sum = 0.0f64;
 
     let streams: std::collections::HashSet<String> = ["bm25", "metadata", "graph"]
-        .iter().map(|s| s.to_string()).collect();
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let qa: serde_json::Value = serde_json::from_str(line)
             .map_err(|e| crate::error::WikiError::Parse(format!("JSONL parse: {e}")))?;
         let query = qa["query"].as_str().unwrap_or("");

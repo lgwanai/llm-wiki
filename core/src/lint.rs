@@ -16,7 +16,8 @@ pub fn find_orphans() -> Vec<LintIssue> {
         has_edge.insert(e.source.clone());
         has_edge.insert(e.target.clone());
     }
-    entities.iter()
+    entities
+        .iter()
         .filter(|(id, _)| !has_edge.contains(*id))
         .map(|(id, e)| LintIssue {
             issue_type: "orphan".into(),
@@ -31,7 +32,8 @@ pub fn find_orphans() -> Vec<LintIssue> {
 pub fn find_stale_claims() -> Vec<LintIssue> {
     let entities = graph::load_entities();
     let now = chrono::Utc::now();
-    entities.iter()
+    entities
+        .iter()
         .filter_map(|(id, e)| {
             let last = e.last_confirmed.as_deref()?;
             let dt = chrono::DateTime::parse_from_rfc3339(last).ok()?;
@@ -43,7 +45,11 @@ pub fn find_stale_claims() -> Vec<LintIssue> {
                     entity_id: Some(id.clone()),
                     name: Some(e.name.clone()),
                     description: format!("Not confirmed in {days} days"),
-                    severity: if days > 365 { "high".into() } else { "low".into() },
+                    severity: if days > 365 {
+                        "high".into()
+                    } else {
+                        "low".into()
+                    },
                 })
             } else {
                 None
@@ -59,11 +65,15 @@ pub fn find_broken_links() -> Vec<LintIssue> {
 
     for subdir in &["entities", "concepts", "decisions", "sessions"] {
         let dir = get_pages_dir().join(subdir);
-        if !dir.exists() { continue; }
+        if !dir.exists() {
+            continue;
+        }
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
                 let content = fs::read_to_string(&path).unwrap_or_default();
                 let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
                 for cap in re.captures_iter(&content) {
@@ -86,14 +96,20 @@ pub fn find_broken_links() -> Vec<LintIssue> {
 
 pub fn find_contradictions() -> Vec<LintIssue> {
     let entities = graph::load_entities();
-    let mut by_name: std::collections::HashMap<String, Vec<(String, f64)>> = std::collections::HashMap::new();
+    let mut by_name: std::collections::HashMap<String, Vec<(String, f64)>> =
+        std::collections::HashMap::new();
     for (id, e) in &entities {
-        by_name.entry(e.name.to_lowercase()).or_default().push((id.clone(), e.confidence));
+        by_name
+            .entry(e.name.to_lowercase())
+            .or_default()
+            .push((id.clone(), e.confidence));
     }
 
     let mut contradictions = Vec::new();
     for (name, entries) in &by_name {
-        if entries.len() < 2 { continue; }
+        if entries.len() < 2 {
+            continue;
+        }
         let confs: Vec<f64> = entries.iter().map(|(_, c)| *c).collect();
         let min_c = confs.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_c = confs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

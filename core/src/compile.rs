@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 
 use crate::compile_parse::parse_compile_response;
 use crate::compile_prompt::build_compile_prompt;
-use crate::config::get_wiki_dir;
+use crate::config::{get_config, get_wiki_dir};
 use crate::error::{WikiError, WikiResult};
 use crate::graph;
 use crate::llm;
+use crate::table_extract;
 use crate::types::{CompileResult, PageType, SourceType};
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "txt", "rst", "adoc", "csv", "tsv", "json", "jsonl",
-    "yaml", "yml", "html", "htm", "xml", "svg", "py", "js", "ts", "jsx",
-    "tsx", "go", "rs", "java", "c", "cc", "cpp", "h", "hpp", "cs", "php",
-    "rb", "sh", "bash", "zsh", "sql", "toml", "ini", "cfg",
+    "md", "markdown", "txt", "rst", "adoc", "csv", "tsv", "json", "jsonl", "yaml", "yml", "html",
+    "htm", "xml", "svg", "py", "js", "ts", "jsx", "tsx", "go", "rs", "java", "c", "cc", "cpp", "h",
+    "hpp", "cs", "php", "rb", "sh", "bash", "zsh", "sql", "toml", "ini", "cfg",
 ];
 
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -32,15 +32,29 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 const PDF_EXTENSIONS: &[&str] = &["pdf"];
 
 const SKIP_DIR_NAMES: &[&str] = &[
-    ".wiki", ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "node_modules", "target",
+    ".wiki",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "target",
 ];
 
 const SENSITIVE_PATTERNS: &[(&str, &str)] = &[
-    (r"(?i)(?:sk|pk|rk)-(?:[a-zA-Z0-9]{20,})", "[REDACTED: API key]"),
-    (r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}", "[REDACTED: GitHub token]"),
-    (r"(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
-     "[REDACTED: Private key]"),
+    (
+        r"(?i)(?:sk|pk|rk)-(?:[a-zA-Z0-9]{20,})",
+        "[REDACTED: API key]",
+    ),
+    (
+        r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}",
+        "[REDACTED: GitHub token]",
+    ),
+    (
+        r"(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+        "[REDACTED: Private key]",
+    ),
     (r"(?i)password\s*[=:]\s*\S+", "password=[REDACTED]"),
     (r"[\w\.-]+@[\w\.-]+\.\w{2,}", "[REDACTED: Email]"),
 ];
@@ -107,7 +121,8 @@ pub fn read_source_content(path: &Path) -> WikiResult<String> {
         read_image_source(path)
     } else {
         Err(WikiError::Parse(format!(
-            "Unsupported file type: {}", path.display()
+            "Unsupported file type: {}",
+            path.display()
         )))
     }
 }
@@ -115,19 +130,36 @@ pub fn read_source_content(path: &Path) -> WikiResult<String> {
 fn read_pdf_source(path: &Path) -> WikiResult<String> {
     let path_str = path.to_string_lossy().to_string();
     let lp_cfg = crate::config::get_liteparse_config();
+    let ocr_cfg = crate::config::get_ocr_config();
 
     // Try liteparse first
     let config = liteparse::LiteParseConfig {
         ocr_language: lp_cfg.ocr_language,
-        ocr_enabled: false, // Force OCR off for reliability
-        ocr_server_url: if lp_cfg.ocr_server_url.is_empty() { None } else { Some(lp_cfg.ocr_server_url) },
+        ocr_enabled: lp_cfg.ocr_enabled,
+        ocr_server_url: if lp_cfg.ocr_server_url.is_empty() {
+            None
+        } else {
+            Some(lp_cfg.ocr_server_url.clone())
+        },
         dpi: lp_cfg.dpi,
         max_pages: lp_cfg.max_pages,
-        num_workers: 1,
+        num_workers: if lp_cfg.num_workers == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get().saturating_sub(1).max(1))
+                .unwrap_or(1)
+        } else {
+            lp_cfg.num_workers
+        },
         ..Default::default()
     };
 
-    let result = match pollster::block_on(liteparse::LiteParse::new(config).parse(&path_str)) {
+    let mut parser = liteparse::LiteParse::new(config);
+    if lp_cfg.ocr_enabled && lp_cfg.ocr_server_url.is_empty() {
+        let engine = crate::local_ocr::LocalOcrEngine::new(ocr_cfg.into());
+        parser = parser.with_ocr_engine(std::sync::Arc::new(engine));
+    }
+
+    let result = match pollster::block_on(parser.parse(&path_str)) {
         Ok(r) => Some(r),
         Err(e) => {
             eprintln!("[pdf] liteparse failed: {e:?}, trying raw read...");
@@ -157,7 +189,9 @@ fn read_pdf_source(path: &Path) -> WikiResult<String> {
         }
     } else {
         // Fallback: extract raw text strings from PDF binary
-        sections.push(format!("> **Format**: PDF (raw text extraction — liteparse failed)"));
+        sections.push(format!(
+            "> **Format**: PDF (raw text extraction — liteparse failed)"
+        ));
         sections.push(String::new());
         let bytes = std::fs::read(path)?;
         let raw = String::from_utf8_lossy(&bytes);
@@ -167,14 +201,24 @@ fn read_pdf_source(path: &Path) -> WikiResult<String> {
         for cap in re.captures_iter(&raw) {
             let content = &cap[1];
             // Filter printable ASCII
-            let cleaned: String = content.chars().filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace()).collect();
+            let cleaned: String = content
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+                .collect();
             if cleaned.len() > 50 {
-                sections.push(format!("## Extracted Block {}\n\n```\n{}\n```\n", found + 1, cleaned.trim()));
+                sections.push(format!(
+                    "## Extracted Block {}\n\n```\n{}\n```\n",
+                    found + 1,
+                    cleaned.trim()
+                ));
                 found += 1;
             }
         }
         if found == 0 {
-            return Err(WikiError::Parse(format!("Cannot extract text from PDF: {}", path.display())));
+            return Err(WikiError::Parse(format!(
+                "Cannot extract text from PDF: {}",
+                path.display()
+            )));
         }
     }
     Ok(sections.join("\n"))
@@ -242,11 +286,26 @@ pub fn ingest_rules(source_type: &SourceType) -> (Vec<&'static str>, &'static st
             "core concepts, named entities, processes, roles, rules, and events",
         ),
         SourceType::Article => (
-            vec!["concept", "entity", "model", "technique", "benchmark", "paper"],
+            vec![
+                "concept",
+                "entity",
+                "model",
+                "technique",
+                "benchmark",
+                "paper",
+            ],
             "claims, concepts, models, techniques, benchmarks, and cited work",
         ),
         SourceType::Code => (
-            vec!["entity", "concept", "framework", "tool", "file", "library", "decision"],
+            vec![
+                "entity",
+                "concept",
+                "framework",
+                "tool",
+                "file",
+                "library",
+                "decision",
+            ],
             "source files, libraries, tools, architectural decisions, and implementation patterns",
         ),
         SourceType::Conversation => (
@@ -281,11 +340,20 @@ pub fn compile_source(
         }
     };
 
-    let content = strip_sensitive(&raw_content);
+    let content = if get_config().compile.strip_sensitive {
+        strip_sensitive(&raw_content)
+    } else {
+        raw_content
+    };
     let lang = llm::detect_language(&content);
     let (entity_types, focus_description) = ingest_rules(source_type);
-    let (system_prompt, user_prompt) =
-        build_compile_prompt(&content, lang, &entity_types, focus_description, source_type);
+    let (system_prompt, user_prompt) = build_compile_prompt(
+        &content,
+        lang,
+        &entity_types,
+        focus_description,
+        source_type,
+    );
 
     if dry_run {
         println!("[DRY-RUN] Would compile: {}", source.display());
@@ -298,15 +366,50 @@ pub fn compile_source(
 
     // Dedup: remove pages with duplicate IDs (LLM sometimes outputs same entity twice)
     let mut seen_ids = std::collections::HashSet::new();
-    let unique_pages: Vec<&crate::compile_parse::ParsedPage> = pages.iter()
+    let unique_pages: Vec<&crate::compile_parse::ParsedPage> = pages
+        .iter()
         .filter(|p| seen_ids.insert(p.id.clone()))
         .collect();
     if unique_pages.len() < pages.len() {
-        eprintln!("Dedup: {} duplicates removed", pages.len() - unique_pages.len());
+        eprintln!(
+            "Dedup: {} duplicates removed",
+            pages.len() - unique_pages.len()
+        );
+    }
+
+    // Clone into mutable pages so we can replace tables with links
+    let mut final_pages: Vec<crate::compile_parse::ParsedPage> =
+        unique_pages.iter().map(|p| (*p).clone()).collect();
+
+    // Extract and store tables from each page body, replace with [[table:xxx]] links
+    let mut total_tables = 0usize;
+    for page in &mut final_pages {
+        let tables = table_extract::extract_tables(&page.body);
+        if tables.is_empty() {
+            continue;
+        }
+        for table in &tables {
+            let table_name = format!("{}_{}", page.id, total_tables);
+            match table_extract::store_table(&table_name, &table.headers, &table.rows) {
+                Ok(name) => {
+                    let link = table_extract::table_link(&name, &table.headers);
+                    page.body = page.body.replacen(&table.raw, &link, 1);
+                    total_tables += 1;
+                }
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Table storage '{}': {e}", table_name));
+                }
+            }
+        }
+    }
+    if total_tables > 0 {
+        eprintln!("Tables extracted: {} tables stored in DuckDB", total_tables);
     }
 
     let mut page_ids: Vec<String> = Vec::new();
-    for page in &unique_pages {
+    for page in &final_pages {
         let page_path = write_wiki_page(page, &wiki_dir)?;
         result.pages_created += 1;
         page_ids.push(page.id.clone());
@@ -339,7 +442,10 @@ pub fn compile_source(
     Ok(result)
 }
 
-fn write_wiki_page(page: &crate::compile_parse::ParsedPage, wiki_dir: &Path) -> WikiResult<PathBuf> {
+fn write_wiki_page(
+    page: &crate::compile_parse::ParsedPage,
+    wiki_dir: &Path,
+) -> WikiResult<PathBuf> {
     let subdir = match page.page_type {
         PageType::Entity => "entities",
         PageType::Concept => "concepts",
@@ -366,8 +472,11 @@ fn write_wiki_page(page: &crate::compile_parse::ParsedPage, wiki_dir: &Path) -> 
             } else if k == "aliases" || k == "keywords" || k == "facts" {
                 // Merge lists
                 let mut set: std::collections::HashSet<String> = as_string_set(merged_fm.get(k));
-                for item in as_string_set(Some(v)) { set.insert(item); }
-                let merged: Vec<serde_json::Value> = set.into_iter().map(serde_json::Value::String).collect();
+                for item in as_string_set(Some(v)) {
+                    set.insert(item);
+                }
+                let merged: Vec<serde_json::Value> =
+                    set.into_iter().map(serde_json::Value::String).collect();
                 merged_fm.insert(k.clone(), serde_json::Value::Array(merged));
             } else if k != "id" {
                 merged_fm.insert(k.clone(), v.clone());
@@ -393,11 +502,14 @@ fn write_wiki_page(page: &crate::compile_parse::ParsedPage, wiki_dir: &Path) -> 
 
 /// Split a page into (frontmatter_json, body_string).
 fn split_page(content: &str) -> (HashMap<String, serde_json::Value>, String) {
-    if content.len() < 8 || !content.starts_with("---\n") { return (HashMap::new(), content.to_string()); }
+    if content.len() < 8 || !content.starts_with("---\n") {
+        return (HashMap::new(), content.to_string());
+    }
     if let Some(end) = content[4..].find("\n---") {
-        let fm = content[4..4+end].trim();
-        let body = content[4+end+4..].trim().to_string();
-        let fm_map = serde_yaml::from_str::<serde_yaml::Value>(fm).ok()
+        let fm = content[4..4 + end].trim();
+        let body = content[4 + end + 4..].trim().to_string();
+        let fm_map = serde_yaml::from_str::<serde_yaml::Value>(fm)
+            .ok()
             .and_then(|v| {
                 let mut m = HashMap::new();
                 if let Some(obj) = v.as_mapping() {
@@ -419,8 +531,14 @@ fn as_string_set(val: Option<&serde_json::Value>) -> std::collections::HashSet<S
     let mut set = std::collections::HashSet::new();
     if let Some(v) = val {
         if let Some(arr) = v.as_array() {
-            for item in arr { if let Some(s) = item.as_str() { set.insert(s.to_string()); } }
-        } else if let Some(s) = v.as_str() { set.insert(s.to_string()); }
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    set.insert(s.to_string());
+                }
+            }
+        } else if let Some(s) = v.as_str() {
+            set.insert(s.to_string());
+        }
     }
     set
 }
@@ -430,9 +548,13 @@ fn merge_bodies(old_body: &str, new_body: &str) -> String {
     let old = old_body.trim();
     let new = new_body.trim();
     // If new contains old (re-compile yielded same content), return new as authoritative
-    if new.contains(old) { return new.to_string(); }
+    if new.contains(old) {
+        return new.to_string();
+    }
     // If old already contains new, no change needed
-    if old.contains(new) { return old.to_string(); }
+    if old.contains(new) {
+        return old.to_string();
+    }
     // Otherwise append with separator
     format!("{old}\n\n<!-- merged -->\n\n{new}")
 }
@@ -451,10 +573,14 @@ fn update_index(wiki_dir: &Path) -> WikiResult<()> {
             for entry in iter.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let content = fs::read_to_string(&path).unwrap_or_default();
-                    let title = extract_frontmatter_field(&content, "name")
-                        .unwrap_or_else(|| name.clone());
+                    let title =
+                        extract_frontmatter_field(&content, "name").unwrap_or_else(|| name.clone());
                     entries.push((name, title));
                 }
             }
@@ -470,7 +596,9 @@ fn update_index(wiki_dir: &Path) -> WikiResult<()> {
 }
 
 pub fn extract_frontmatter_field(content: &str, key: &str) -> Option<String> {
-    if content.len() < 8 || !content.starts_with("---\n") { return None; }
+    if content.len() < 8 || !content.starts_with("---\n") {
+        return None;
+    }
     let end = content[4..].find("\n---").map(|i| i + 4)?;
     let fm = &content[4..end];
     for line in fm.lines() {

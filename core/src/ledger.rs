@@ -7,40 +7,59 @@ use std::path::PathBuf;
 use crate::config::get_ledger_db_path;
 use crate::error::{WikiError, WikiResult};
 
-const VALID_TYPES: &[&str] = &["string", "text", "integer", "number", "boolean", "date", "datetime"];
+const VALID_TYPES: &[&str] = &[
+    "string", "text", "integer", "number", "boolean", "date", "datetime",
+];
 
 const TYPE_MAP: &[(&str, &str)] = &[
-    ("string", "VARCHAR"), ("text", "VARCHAR"), ("integer", "INTEGER"),
-    ("number", "DOUBLE"), ("boolean", "BOOLEAN"), ("date", "DATE"),
+    ("string", "VARCHAR"),
+    ("text", "VARCHAR"),
+    ("integer", "INTEGER"),
+    ("number", "DOUBLE"),
+    ("boolean", "BOOLEAN"),
+    ("date", "DATE"),
     ("datetime", "TIMESTAMP"),
 ];
 
 fn duck_type(t: &str) -> &str {
-    TYPE_MAP.iter().find(|(k, _)| *k == t).map(|(_, v)| *v).unwrap_or("VARCHAR")
+    TYPE_MAP
+        .iter()
+        .find(|(k, _)| *k == t)
+        .map(|(_, v)| *v)
+        .unwrap_or("VARCHAR")
 }
 
-fn slugify(name: &str) -> String {
-    name.to_lowercase().replace([' ', '_'], "-")
-        .chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>()
-        .trim_matches('-').to_string()
+pub fn slugify(name: &str) -> String {
+    name.to_lowercase()
+        .replace([' ', '_'], "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 fn get_conn(read_only: bool) -> WikiResult<duckdb::Connection> {
     let db_path = get_ledger_db_path();
-    if let Some(p) = db_path.parent() { fs::create_dir_all(p)?; }
+    if let Some(p) = db_path.parent() {
+        fs::create_dir_all(p)?;
+    }
     if read_only && !db_path.exists() {
         return Err(WikiError::NotFound("No ledger database found.".into()));
     }
     let conn = duckdb::Connection::open(&db_path)?;
     if !read_only {
-        conn.execute("CREATE TABLE IF NOT EXISTS _registry (
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _registry (
             actual_name VARCHAR PRIMARY KEY, display_name VARCHAR NOT NULL,
             description VARCHAR DEFAULT '', record_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             fields_json VARCHAR DEFAULT '[]', unique_key VARCHAR DEFAULT '[]',
             auto_increment BOOLEAN DEFAULT FALSE, auto_increment_field VARCHAR DEFAULT NULL
-        )", [])?;
+        )",
+            [],
+        )?;
     }
     Ok(conn)
 }
@@ -60,24 +79,37 @@ pub fn list_tables() -> WikiResult<Vec<serde_json::Value>> {
 }
 
 pub fn create_table(
-    display_name: &str, fields_json: &str, unique: Option<&str>,
-    auto_increment: bool, table_name: Option<&str>, description: &str,
+    display_name: &str,
+    fields_json: &str,
+    unique: Option<&str>,
+    auto_increment: bool,
+    table_name: Option<&str>,
+    description: &str,
 ) -> WikiResult<String> {
     let fields: Vec<serde_json::Value> = serde_json::from_str(fields_json)
         .map_err(|e| WikiError::Validation(format!("Invalid fields JSON: {e}")))?;
 
-    let safe_name = table_name.map(|s| s.to_string())
+    let safe_name = table_name
+        .map(|s| s.to_string())
         .unwrap_or_else(|| slugify(display_name));
     if safe_name.is_empty() {
-        return Err(WikiError::Validation("Table name is empty after slugify".into()));
+        return Err(WikiError::Validation(
+            "Table name is empty after slugify".into(),
+        ));
     }
 
     let conn = get_conn(false)?;
 
     // Check if exists
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM _registry WHERE actual_name = ?", [&safe_name], |r| r.get(0))?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _registry WHERE actual_name = ?",
+        [&safe_name],
+        |r| r.get(0),
+    )?;
     if count > 0 {
-        return Err(WikiError::Validation(format!("Table '{safe_name}' already exists")));
+        return Err(WikiError::Validation(format!(
+            "Table '{safe_name}' already exists"
+        )));
     }
 
     // Build column DDL
@@ -90,13 +122,19 @@ pub fn create_table(
         let name = f["name"].as_str().unwrap_or("field");
         let ftype = f["type"].as_str().unwrap_or("string");
         if !VALID_TYPES.contains(&ftype) {
-            return Err(WikiError::Validation(format!("Invalid field type: {ftype}")));
+            return Err(WikiError::Validation(format!(
+                "Invalid field type: {ftype}"
+            )));
         }
         col_defs.push(format!("\"{}\" {}", name, duck_type(ftype)));
         field_descs.push(f.clone());
     }
 
-    let ddl = format!("CREATE TABLE IF NOT EXISTS \"{}\" ({})", safe_name, col_defs.join(", "));
+    let ddl = format!(
+        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
+        safe_name,
+        col_defs.join(", ")
+    );
     conn.execute(&ddl, [])?;
 
     // Register
@@ -121,14 +159,28 @@ pub fn insert_data(table: &str, data_json: &str, batch: bool) -> WikiResult<usiz
 
     let mut inserted = 0;
     for row in &rows {
-        let obj = row.as_object().ok_or_else(|| WikiError::Validation("Row must be an object".into()))?;
+        let obj = row
+            .as_object()
+            .ok_or_else(|| WikiError::Validation("Row must be an object".into()))?;
         let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-        let vals: Vec<String> = obj.values().map(|v| v.to_string().trim_matches('"').to_string()).collect();
+        let vals: Vec<String> = obj
+            .values()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            })
+            .collect();
         let placeholders: Vec<&str> = vec!["?"; cols.len()];
         let sql = format!(
             "INSERT INTO \"{}\" ({}) VALUES ({})",
             table,
-            cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", "),
+            cols.iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         );
         match conn.execute(&sql, duckdb::params_from_iter(vals.iter())) {
@@ -157,7 +209,9 @@ pub fn show_table(table: &str) -> WikiResult<serde_json::Value> {
     );
     match info {
         Ok(v) => Ok(v),
-        Err(duckdb::Error::QueryReturnedNoRows) => Err(WikiError::NotFound(format!("Table '{table}' not found"))),
+        Err(duckdb::Error::QueryReturnedNoRows) => {
+            Err(WikiError::NotFound(format!("Table '{table}' not found")))
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -172,7 +226,8 @@ pub fn delete_table(table: &str) -> WikiResult<()> {
 pub fn table_stats(table: Option<&str>) -> WikiResult<serde_json::Value> {
     let conn = get_conn(true)?;
     if let Some(t) = table {
-        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), [], |r| r.get(0))?;
+        let count: i64 =
+            conn.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), [], |r| r.get(0))?;
         Ok(serde_json::json!({"table": t, "row_count": count}))
     } else {
         let mut stmt = conn.prepare("SELECT actual_name, record_count FROM _registry")?;
@@ -193,7 +248,22 @@ pub fn export_csv(table: &str, output: Option<&str>) -> WikiResult<String> {
     let mut csv_out = cols.join(",") + "\n";
     let rows = stmt.query_map([], |row| {
         let vals: Vec<String> = (0..row.as_ref().column_count())
-            .map(|i| format!("{:?}", row.get::<_, duckdb::types::Value>(i).unwrap_or(duckdb::types::Value::Null)))
+            .map(|i| {
+                let raw = row
+                    .get::<_, duckdb::types::Value>(i)
+                    .map(|v| {
+                        // Strip Debug variant prefix for cleaner CSV output
+                        let dbg = format!("{:?}", v);
+                        csv_strip_debug_prefix(&dbg)
+                    })
+                    .unwrap_or_default();
+                // CSV-escape: wrap in quotes if the value contains comma, quote, or newline
+                if raw.contains(',') || raw.contains('"') || raw.contains('\n') {
+                    format!("\"{}\"", raw.replace('"', "\"\""))
+                } else {
+                    raw
+                }
+            })
             .collect();
         Ok(vals.join(","))
     })?;
@@ -208,18 +278,45 @@ pub fn export_csv(table: &str, output: Option<&str>) -> WikiResult<String> {
     Ok(csv_out)
 }
 
+/// Strip the Debug variant prefix from duckdb Value Debug output.
+/// e.g. `Text("hello")` → `hello`, `Int(42)` → `42`, `Null` → ``
+fn csv_strip_debug_prefix(dbg: &str) -> String {
+    if dbg == "Null" {
+        return String::new();
+    }
+    if let Some(paren) = dbg.find('(') {
+        let inner = &dbg[paren + 1..];
+        // Strip trailing `)`
+        let inner = inner.strip_suffix(')').unwrap_or(inner);
+        // Strip surrounding quotes from Text/Blob variants
+        if (inner.starts_with('"') && inner.ends_with('"'))
+            || (inner.starts_with('\'') && inner.ends_with('\''))
+        {
+            inner[1..inner.len() - 1].to_string()
+        } else {
+            inner.to_string()
+        }
+    } else {
+        dbg.to_string()
+    }
+}
+
 /// Import a JSON array file as a ledger table. Returns the table name.
 pub fn import_json(file: &str, name: Option<&str>) -> WikiResult<String> {
     let path = PathBuf::from(file);
-    if !path.exists() { return Err(WikiError::NotFound(format!("File not found: {file}"))); }
+    if !path.exists() {
+        return Err(WikiError::NotFound(format!("File not found: {file}")));
+    }
     let content = fs::read_to_string(&path)?;
     let data: Vec<serde_json::Value> = serde_json::from_str(&content)
         .map_err(|e| WikiError::Parse(format!("Invalid JSON: {e}")))?;
-    if data.is_empty() { return Err(WikiError::Parse("JSON array is empty".into())); }
+    if data.is_empty() {
+        return Err(WikiError::Parse("JSON array is empty".into()));
+    }
 
-    let table_name = name.map(|n| slugify(n)).unwrap_or_else(|| {
-        slugify(&path.file_stem().unwrap_or_default().to_string_lossy())
-    });
+    let table_name = name
+        .map(|n| slugify(n))
+        .unwrap_or_else(|| slugify(&path.file_stem().unwrap_or_default().to_string_lossy()));
 
     // Infer column types from first row
     let first = &data[0];
@@ -232,7 +329,14 @@ pub fn import_json(file: &str, name: Option<&str>) -> WikiResult<String> {
     }
 
     let fields_json = serde_json::to_string(&fields)?;
-    let safe_name = create_table(name.unwrap_or(&table_name), &fields_json, None, true, Some(&table_name), "")?;
+    let safe_name = create_table(
+        name.unwrap_or(&table_name),
+        &fields_json,
+        None,
+        true,
+        Some(&table_name),
+        "",
+    )?;
 
     // Insert rows
     for row in &data {
@@ -246,7 +350,9 @@ pub fn import_json(file: &str, name: Option<&str>) -> WikiResult<String> {
 /// Import Excel file by converting to JSON via Python
 pub fn import_excel(file: &str, name: Option<&str>) -> WikiResult<String> {
     let path = PathBuf::from(file);
-    if !path.exists() { return Err(WikiError::NotFound(format!("File not found: {file}"))); }
+    if !path.exists() {
+        return Err(WikiError::NotFound(format!("File not found: {file}")));
+    }
 
     // Use Python to convert xlsx to JSON
     let python_script = format!(
@@ -258,31 +364,48 @@ rows = []
 for row in ws.iter_rows(min_row=2, values_only=True):
     rows.append({{headers[i]: str(v) if v is not None else None for i,v in enumerate(row)}})
 print(json.dumps(rows, ensure_ascii=False))
-"#, path.display());
+"#,
+        path.display()
+    );
 
-    let output = duct::cmd!("python3", "-c", python_script)
+    let output = duct::cmd(python_command(), ["-c".to_string(), python_script])
         .stdout_capture()
         .stderr_capture()
         .run()
         .map_err(|e| WikiError::Parse(format!("Python/Excel error: {e}")))?;
 
     let json_str = String::from_utf8_lossy(&output.stdout);
-    let data: Vec<serde_json::Value> = serde_json::from_str(&json_str)
-        .map_err(|e| WikiError::Parse(format!("Excel conversion failed: {e}\n{}", String::from_utf8_lossy(&output.stderr))))?;
-    if data.is_empty() { return Err(WikiError::Parse("Excel file has no data rows".into())); }
+    let data: Vec<serde_json::Value> = serde_json::from_str(&json_str).map_err(|e| {
+        WikiError::Parse(format!(
+            "Excel conversion failed: {e}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    })?;
+    if data.is_empty() {
+        return Err(WikiError::Parse("Excel file has no data rows".into()));
+    }
 
-    let table_name = name.map(|n| slugify(n)).unwrap_or_else(|| {
-        slugify(&path.file_stem().unwrap_or_default().to_string_lossy())
-    });
+    let table_name = name
+        .map(|n| slugify(n))
+        .unwrap_or_else(|| slugify(&path.file_stem().unwrap_or_default().to_string_lossy()));
 
     let first = &data[0];
     let mut fields = Vec::new();
     if let Some(obj) = first.as_object() {
-        for (k, v) in obj { fields.push(serde_json::json!({"name": k, "type": infer_json_type(v)})); }
+        for (k, v) in obj {
+            fields.push(serde_json::json!({"name": k, "type": infer_json_type(v)}));
+        }
     }
 
     let fields_json = serde_json::to_string(&fields)?;
-    let safe_name = create_table(name.unwrap_or(&table_name), &fields_json, None, true, Some(&table_name), "")?;
+    let safe_name = create_table(
+        name.unwrap_or(&table_name),
+        &fields_json,
+        None,
+        true,
+        Some(&table_name),
+        "",
+    )?;
 
     for row in &data {
         let json_str = serde_json::to_string(row)?;
@@ -290,6 +413,19 @@ print(json.dumps(rows, ensure_ascii=False))
     }
 
     Ok(format!("{safe_name} ({} rows)", data.len()))
+}
+
+fn python_command() -> String {
+    if let Ok(path) = std::env::var("LLM_WIKI_PYTHON") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if cfg!(windows) {
+        "python".into()
+    } else {
+        "python3".into()
+    }
 }
 
 fn infer_json_type(v: &serde_json::Value) -> &str {
@@ -308,8 +444,13 @@ pub fn import_csv(file: &str, name: Option<&str>) -> WikiResult<String> {
 
     let content = fs::read_to_string(&path)?;
     let mut lines = content.lines();
-    let header = lines.next().ok_or_else(|| WikiError::Parse("CSV has no header".into()))?;
-    let cols: Vec<&str> = header.split(',').map(|s| s.trim().trim_matches('"')).collect();
+    let header = lines
+        .next()
+        .ok_or_else(|| WikiError::Parse("CSV has no header".into()))?;
+    let cols: Vec<&str> = header
+        .split(',')
+        .map(|s| s.trim().trim_matches('"'))
+        .collect();
 
     // Infer types from first data row
     let mut type_hints: Vec<&str> = vec!["string"; cols.len()];
@@ -317,35 +458,61 @@ pub fn import_csv(file: &str, name: Option<&str>) -> WikiResult<String> {
         let vals: Vec<&str> = first.split(',').collect();
         for (i, v) in vals.iter().enumerate() {
             if i < cols.len() {
-                if v.parse::<i64>().is_ok() { type_hints[i] = "integer"; }
-                else if v.parse::<f64>().is_ok() { type_hints[i] = "number"; }
+                if v.parse::<i64>().is_ok() {
+                    type_hints[i] = "integer";
+                } else if v.parse::<f64>().is_ok() {
+                    type_hints[i] = "number";
+                }
             }
         }
     }
 
-    let fields: Vec<serde_json::Value> = cols.iter().enumerate().map(|(i, c)| {
-        serde_json::json!({"name": c.trim().trim_matches('"'), "type": type_hints[i]})
-    }).collect();
+    let fields: Vec<serde_json::Value> = cols
+        .iter()
+        .enumerate()
+        .map(
+            |(i, c)| serde_json::json!({"name": c.trim().trim_matches('"'), "type": type_hints[i]}),
+        )
+        .collect();
 
     let table_name = create_table(
         name.unwrap_or(&path.file_stem().unwrap_or_default().to_string_lossy()),
         &serde_json::to_string(&fields)?,
-        None, true, None, "",
+        None,
+        true,
+        None,
+        "",
     )?;
 
     let mut inserted = 0;
     let conn = get_conn(false)?;
     for line in lines {
-        let vals: Vec<String> = line.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect();
-        if vals.len() != cols.len() { continue; }
+        let vals: Vec<String> = line
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .collect();
+        if vals.len() != cols.len() {
+            continue;
+        }
         let placeholders: Vec<&str> = vec!["?"; vals.len()];
         let col_names: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
-        let sql = format!("INSERT INTO \"{}\" ({}) VALUES ({})", table_name, col_names.join(", "), placeholders.join(", "));
-        if conn.execute(&sql, duckdb::params_from_iter(vals.iter())).is_ok() {
+        let sql = format!(
+            "INSERT INTO \"{}\" ({}) VALUES ({})",
+            table_name,
+            col_names.join(", "),
+            placeholders.join(", ")
+        );
+        if conn
+            .execute(&sql, duckdb::params_from_iter(vals.iter()))
+            .is_ok()
+        {
             inserted += 1;
         }
     }
 
-    conn.execute("UPDATE _registry SET record_count = ? WHERE actual_name = ?", duckdb::params![inserted as i64, table_name])?;
+    conn.execute(
+        "UPDATE _registry SET record_count = ? WHERE actual_name = ?",
+        duckdb::params![inserted as i64, table_name],
+    )?;
     Ok(table_name)
 }

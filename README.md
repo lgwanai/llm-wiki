@@ -30,23 +30,22 @@ Cross-platform desktop app (macOS/Windows/Linux) with Codex-themed UI.
 ### Install
 
 ```bash
-# macOS
-brew install llm-wiki        # (coming soon)
-
-# Or build from source
-git clone https://github.com/anomalyco/llm-wiki-rust
-cd llm-wiki-rust
-npm install && npm run tauri build
+# Download the release package for your OS, then install the desktop app.
+# CLI binaries are included under release/cli/ as wiki or wiki.exe.
+wiki config --check
 ```
 
-The app will be at `target/release/bundle/macos/llm-wiki.app`
+Maintainers can build platform packages with `npm run package:all`.
 
 ### CLI
 
 ```bash
-# Install CLI binary
-cargo build -p llm-wiki-cli --release
-cp target/release/wiki ~/.local/bin/
+# Download/extract a release package, then install the compiled binary
+scripts/install-cli.sh
+
+# Or copy release/cli/wiki to any directory on PATH
+cp release/cli/wiki ~/.local/bin/wiki
+chmod +x ~/.local/bin/wiki
 
 # Initialize a wiki
 wiki init
@@ -60,6 +59,10 @@ wiki query "What is DeepSeek?"
 # Full list of commands
 wiki --help
 ```
+
+Users do not need Rust or Cargo to use the CLI. The CLI is a single compiled
+`wiki` binary and reads configuration from `LLM_WIKI_CONFIG`, a project
+`wiki_config.yaml`, or `~/.config/llm-wiki/wiki_config.yaml`.
 
 ### Configuration
 
@@ -128,7 +131,7 @@ cargo test --workspace
 npm run tauri dev
 
 # Release build
-npm run tauri build
+npm run package:all
 ```
 
 ## License

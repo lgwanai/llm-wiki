@@ -35,6 +35,9 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub compile: CompileConfig,
 }
 
 fn default_wiki_dir() -> String {
@@ -125,6 +128,27 @@ pub struct OcrConfig {
     #[serde(default = "default_ocr_backend")]
     pub backend: String,
 
+    /// Local OCR engine used for PDF OCR when liteparse OCR is enabled.
+    /// Supported values: paddleocr, paddleocr-vl, mineru, deepseek-ocr.
+    #[serde(default = "default_ocr_engine")]
+    pub engine: String,
+
+    /// Local model name. For PaddleOCR this can be a PP-OCR model family/name.
+    #[serde(default = "default_ocr_model")]
+    pub model: String,
+
+    /// Root directory containing local OCR model folders.
+    #[serde(default = "default_ocr_model_root")]
+    pub model_root: String,
+
+    /// Inference device: auto, cpu, cuda, or mps.
+    #[serde(default = "default_ocr_device")]
+    pub device: String,
+
+    /// Automatically create the local OCR runtime and download model weights.
+    #[serde(default = "default_ocr_auto_download")]
+    pub auto_download: bool,
+
     #[serde(default)]
     pub api_provider: String,
 
@@ -152,6 +176,11 @@ impl Default for OcrConfig {
         Self {
             mode: default_ocr_mode(),
             backend: default_ocr_backend(),
+            engine: default_ocr_engine(),
+            model: default_ocr_model(),
+            model_root: default_ocr_model_root(),
+            device: default_ocr_device(),
+            auto_download: default_ocr_auto_download(),
             api_provider: String::new(),
             api_url: String::new(),
             api_key: String::new(),
@@ -167,7 +196,25 @@ fn default_ocr_mode() -> String {
     "local".into()
 }
 fn default_ocr_backend() -> String {
-    "api".into()
+    "paddleocr".into()
+}
+fn default_ocr_engine() -> String {
+    "paddleocr".into()
+}
+fn default_ocr_model() -> String {
+    "PaddleOCR-VL-1.5-8bit".into()
+}
+fn default_ocr_model_root() -> String {
+    if let Ok(path) = std::env::var("LLM_WIKI_OCR_MODEL_ROOT") {
+        return path;
+    }
+    String::new()
+}
+fn default_ocr_device() -> String {
+    "auto".into()
+}
+fn default_ocr_auto_download() -> bool {
+    true
 }
 fn default_ocr_prompt() -> String {
     "Convert the document to clean markdown format.".into()
@@ -350,6 +397,22 @@ fn default_log_level() -> String {
 pub struct QualityConfig {
     pub min_confidence: Option<f64>,
     pub max_stale_days: Option<u32>,
+}
+
+/// Compilation behaviour configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompileConfig {
+    /// Strip sensitive data (API keys, tokens, passwords) before sending to LLM.
+    #[serde(default = "default_true")]
+    pub strip_sensitive: bool,
+}
+
+impl Default for CompileConfig {
+    fn default() -> Self {
+        Self {
+            strip_sensitive: true,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

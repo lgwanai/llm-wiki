@@ -197,10 +197,9 @@ pub fn call_llm(
                 reqwest::header::CONTENT_TYPE,
                 reqwest::header::HeaderValue::from_static("application/json"),
             );
-            if let Ok(auth) = reqwest::header::HeaderValue::from_str(&format!(
-                "Bearer {}",
-                llm_config.api_key
-            )) {
+            if let Ok(auth) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", llm_config.api_key))
+            {
                 headers.insert(reqwest::header::AUTHORIZATION, auth);
             }
 
@@ -262,9 +261,9 @@ pub fn call_llm(
                 }
 
                 // Parse response
-                let data: serde_json::Value = resp.json().map_err(|e| {
-                    WikiError::Llm(format!("LLM API returned invalid JSON: {e}"))
-                })?;
+                let data: serde_json::Value = resp
+                    .json()
+                    .map_err(|e| WikiError::Llm(format!("LLM API returned invalid JSON: {e}")))?;
 
                 // Extract content based on provider format
                 let content = if provider == "ollama" {
@@ -281,9 +280,7 @@ pub fn call_llm(
                 };
 
                 if content.is_empty() {
-                    return Err(WikiError::Llm(
-                        "LLM returned empty response content".into(),
-                    ));
+                    return Err(WikiError::Llm("LLM returned empty response content".into()));
                 }
 
                 return Ok(content.trim().to_string());
@@ -322,12 +319,15 @@ pub fn call_llm_default(system_prompt: &str, user_content: &str) -> WikiResult<S
 
 /// Streaming LLM call — calls callback with each token.
 pub fn call_llm_stream(
-    system_prompt: &str, user_content: &str,
+    system_prompt: &str,
+    user_content: &str,
     mut on_token: impl FnMut(&str),
 ) -> WikiResult<()> {
     let llm_config = get_llm_config();
     let provider = llm_config.provider.as_str();
-    let client = Client::builder().timeout(std::time::Duration::from_secs(180)).build()
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
         .map_err(|e| WikiError::Llm(format!("Client: {e}")))?;
 
     if provider == "ollama" {
@@ -336,9 +336,21 @@ pub fn call_llm_stream(
             "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
             "options": {"temperature": llm_config.temperature, "num_ctx": llm_config.num_ctx},
         });
-        let resp = client.post(format!("{}/api/chat", llm_config.base_url.trim_end_matches('/'))).json(&payload).send()?;
+        let resp = client
+            .post(format!(
+                "{}/api/chat",
+                llm_config.base_url.trim_end_matches('/')
+            ))
+            .json(&payload)
+            .send()?;
         for line in std::io::BufRead::lines(std::io::BufReader::new(resp)) {
-            if let Ok(line) = line { if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) { if let Some(t) = v["message"]["content"].as_str() { on_token(t); } } }
+            if let Ok(line) = line {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(t) = v["message"]["content"].as_str() {
+                        on_token(t);
+                    }
+                }
+            }
         }
     } else {
         let api_url = get_api_url();
@@ -346,17 +358,26 @@ pub fn call_llm_stream(
             "model": llm_config.model, "temperature": llm_config.temperature, "max_tokens": llm_config.max_tokens.min(4096), "stream": true,
             "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
         });
-        if provider == "deepseek" { payload["thinking"] = serde_json::json!({"type":"disabled"}); }
-        let resp = client.post(&api_url)
+        if provider == "deepseek" {
+            payload["thinking"] = serde_json::json!({"type":"disabled"});
+        }
+        let resp = client
+            .post(&api_url)
             .header("Authorization", format!("Bearer {}", llm_config.api_key))
-            .header("Content-Type", "application/json").json(&payload).send()?;
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()?;
         for line in std::io::BufRead::lines(std::io::BufReader::new(resp)) {
             if let Ok(line) = line {
                 let line = line.trim().to_string();
-                if line == "[DONE]" || line.is_empty() { continue; }
+                if line == "[DONE]" || line.is_empty() {
+                    continue;
+                }
                 if let Some(data) = line.strip_prefix("data: ") {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(t) = v["choices"][0]["delta"]["content"].as_str() { on_token(t); }
+                        if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
+                            on_token(t);
+                        }
                     }
                 }
             }

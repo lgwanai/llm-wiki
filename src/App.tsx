@@ -1,5 +1,11 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
+import MDEditor from "@uiw/react-md-editor";
 import { Folder, FileText, Box, Network, Database, Search, Settings, Play, Circle, CheckCircle, XCircle, Loader, Send, ChevronRight } from "lucide-react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
+import "@uiw/react-md-editor/markdown-editor.css";
+import "@uiw/react-markdown-preview/markdown.css";
 
 // Types
 interface PageInfo { id: string; name: string; type: string; path: string; }
@@ -29,6 +35,8 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [editMode, setEditMode] = useState(false);
   const [editContent, setEditContent] = useState("");
+  const [selectedSource, setSelectedSource] = useState<{ path: string; name: string } | null>(null);
+  const [sourceEditContent, setSourceEditContent] = useState("");
   const [compileConfirm, setCompileConfirm] = useState<{ path: string; name: string } | null>(null);
 
   const openWorkspace = useCallback(async () => {
@@ -66,7 +74,7 @@ export default function App() {
   const importFiles = useCallback(async () => {
     try {
       const dialog = await import("@tauri-apps/plugin-dialog");
-      const files = await dialog.open({ multiple: true, title: "Import Files", filters: [{ name: "Documents", extensions: ["md","txt","pdf","png","jpg","jpeg","py","rs","js","ts","json","yaml"] }] });
+      const files = await dialog.open({ multiple: true, title: "Import Files", filters: [{ name: "Documents", extensions: ["md","markdown","mdown","txt","pdf","png","jpg","jpeg","py","rs","js","ts","json","yaml"] }] });
       if (files) {
         const fileList = Array.isArray(files) ? files : [files];
         for (const src of fileList) {
@@ -96,17 +104,31 @@ export default function App() {
   }, [sourceFiles, compileFile]);
 
   const selectPage = useCallback(async (pageId: string) => {
-    setSection("files"); setSelectedPage(pageId); setEditMode(false);
+    setSection("files"); setSelectedSource(null); setSelectedPage(pageId); setEditMode(false);
     try { setPageContent(await invoke("get_page_content", { pageId }) as string); }
     catch { setPageContent(`# ${pageId}\n\nNot found.`); }
   }, []);
 
   const selectTable = useCallback(async (tableName: string) => {
-    setSection("tables"); setSelectedPage(tableName);
+    setSection("tables"); setSelectedSource(null); setSelectedPage(tableName);
     try { setPageContent(await invoke("get_table_content", { table: tableName }) as string); }
     catch { setPageContent(`Table: ${tableName}\n\nNo data.`); }
     setEditMode(false);
   }, []);
+
+  const openSourceMarkdown = useCallback(async (file: SourceFile) => {
+    setSection("files"); setSelectedPage(null); setEditMode(false); setSelectedSource({ path: file.path, name: file.name });
+    try { setSourceEditContent(await invoke("get_source_file_content", { path: file.path }) as string); }
+    catch (e) { setSourceEditContent(`# ${file.name}\n\n${String(e)}`); }
+  }, []);
+
+  const saveSourceMarkdown = useCallback(async () => {
+    if (!selectedSource) return;
+    try {
+      await invoke("save_source_file_content", { path: selectedSource.path, content: sourceEditContent });
+      if (wsPath) await listFiles(wsPath);
+    } catch (e) { console.error(e); }
+  }, [selectedSource, sourceEditContent, wsPath, listFiles]);
 
   const saveEdit = useCallback(async () => {
     if (!selectedPage) return;
@@ -194,6 +216,7 @@ export default function App() {
           sourceFiles={sourceFiles} pages={pages} graphNodes={graphNodes} tables={tables}
           onOpenWorkspace={openWorkspace} onSelectPage={selectPage} onSelectTable={selectTable}
           onCompileAll={compileAll} onCompileFile={(path: string) => { const f = sourceFiles.find(f => f.path === path); if (f) setCompileConfirm({ path, name: f.name }); }}
+          onOpenSourceMarkdown={openSourceMarkdown}
           onImportFiles={importFiles} onShowConfig={() => setShowConfig(true)}
           onCompileClick={(path: string, name: string) => setCompileConfirm({ path, name })} />
 
@@ -206,8 +229,10 @@ export default function App() {
           ) : isTables ? (
             <LedgerView tableName={selectedPage} content={pageContent} tables={tables} onSelectTable={selectTable}
               editMode={editMode} editContent={editContent} setEditContent={setEditContent} onStartEdit={startEdit} onSaveEdit={saveEdit} onCancelEdit={() => setEditMode(false)} />
+          ) : selectedSource ? (
+            <SourceMarkdownEditor source={selectedSource} content={sourceEditContent} onChange={setSourceEditContent} onSave={saveSourceMarkdown} onCompile={() => setCompileConfirm({ path: selectedSource.path, name: selectedSource.name })} />
           ) : selectedPage ? (
-            <PageView pageId={selectedPage} pageName={pageName} content={pageContent} onSelectPage={selectPage}
+            <PageView pageId={selectedPage} pageName={pageName} content={pageContent} onSelectPage={selectPage} onSelectTable={selectTable}
               editMode={editMode} editContent={editContent} setEditContent={setEditContent}
               onStartEdit={startEdit} onSaveEdit={saveEdit} onCancelEdit={() => setEditMode(false)} />
           ) : (
@@ -243,7 +268,7 @@ export default function App() {
 }
 
 // ═══════════════════════════════════════════════ SIDEBAR
-function Sidebar({ wsPath, wsName, section, onSectionChange, sourceFiles, pages, graphNodes, tables, onOpenWorkspace, onSelectPage, onSelectTable, onCompileAll, onCompileFile, onImportFiles, onShowConfig, onCompileClick }: any) {
+function Sidebar({ wsPath, wsName, section, onSectionChange, sourceFiles, pages, graphNodes, tables, onOpenWorkspace, onSelectPage, onSelectTable, onCompileAll, onCompileFile, onOpenSourceMarkdown, onImportFiles, onShowConfig, onCompileClick }: any) {
   const [search, setSearch] = useState("");
   const tabs: { key: string; icon: React.ReactNode; label: string }[] = [
     { key: "files", icon: <FileText size={13} />, label: "Files" },
@@ -292,7 +317,7 @@ function Sidebar({ wsPath, wsName, section, onSectionChange, sourceFiles, pages,
             <SectionLabel icon={<FileText size={11} />} text="Source Files" count={filteredFiles.length} action={filteredFiles.length > 0 ? "Compile All" : undefined} onAction={onCompileAll} />
             {filteredFiles.map((f: any, i: number) => (
               <div key={f.path} style={{ padding: "3px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-                onClick={() => onCompileClick(f.path, f.name)}
+                onClick={() => isMarkdownSource(f.name) ? onOpenSourceMarkdown(f) : onCompileClick(f.path, f.name)}
                 onMouseEnter={e => { (e.target as HTMLElement).style.background = "var(--color-muted)"; }}
                 onMouseLeave={e => { (e.target as HTMLElement).style.background = "transparent"; }}>
                 {f.status === "done" ? <CheckCircle size={11} style={{ color: "hsl(160 84% 39%)" }} /> : f.status === "error" ? <span title={f.error || "Compile failed"}><XCircle size={11} style={{ color: "hsl(0 84% 60%)", cursor: "help" }} /></span> : f.status === "compiling" ? <Loader size={11} style={{ color: "hsl(40 84% 60%)" }} /> : <Circle size={11} style={{ color: "var(--color-muted-fg)" }} />}
@@ -356,6 +381,10 @@ function ListRow({ label, sub, onClick }: { label: string; sub?: string; onClick
   );
 }
 
+function isMarkdownSource(name: string) {
+  return /\.(md|markdown|mdown)$/i.test(name);
+}
+
 // Tree view for source files
 function FileTree({ files, onCompileFile, onOpenPage }: { files: SourceFile[]; onCompileFile: (path: string) => void; onOpenPage: (id: string) => void }) {
   if (files.length === 0) return null;
@@ -413,7 +442,9 @@ function FileRow({ file, onCompile, onOpenPage, depth }: { file: SourceFile; onC
   const indent = depth * 14;
   const isPdf = file.name.endsWith(".pdf");
   const handleClick = () => {
-    if (file.status === "done" && !isPdf) {
+    if (isMarkdownSource(file.name)) {
+      onOpenPage(file.name.replace(/\.\w+$/, ""));
+    } else if (file.status === "done" && !isPdf) {
       onOpenPage(file.name.replace(/\.\w+$/, ""));
     } else {
       onCompile(file.path);
@@ -432,8 +463,28 @@ function FileRow({ file, onCompile, onOpenPage, depth }: { file: SourceFile; onC
   );
 }
 
+function SourceMarkdownEditor({ source, content, onChange, onSave, onCompile }: { source: { path: string; name: string }; content: string; onChange: (value: string) => void; onSave: () => void; onCompile: () => void }) {
+  return (
+    <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }} data-color-mode="dark">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 24px 12px", borderBottom: "1px solid var(--color-border)" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-accent)", textTransform: "uppercase", letterSpacing: "0.05em" }}>source markdown</div>
+          <h1 style={{ fontSize: 20, fontWeight: 600, margin: "2px 0 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{source.name}</h1>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-primary" onClick={onSave} style={{ fontSize: 12 }}>Save</button>
+          <button className="btn" onClick={onCompile} style={{ fontSize: 12 }}><Play size={13} /> Compile</button>
+        </div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, padding: 16 }}>
+        <MDEditor value={content} onChange={value => onChange(value || "")} height="100%" preview="live" textareaProps={{ spellCheck: false }} />
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════ PAGE VIEWER
-function PageView({ pageId, pageName, content, editMode, editContent, setEditContent, onStartEdit, onSaveEdit, onCancelEdit, onSelectPage }: any) {
+function PageView({ pageId, pageName, content, editMode, editContent, setEditContent, onStartEdit, onSaveEdit, onCancelEdit, onSelectPage, onSelectTable }: any) {
   // Split frontmatter + body for styled display
   let fm: Record<string, any> | null = null;
   let body = content;
@@ -474,112 +525,60 @@ function PageView({ pageId, pageName, content, editMode, editContent, setEditCon
 
       <div style={{ padding: "20px 32px 48px", maxWidth: 800 }}>
         {editMode ? (
-          <textarea value={editContent} onChange={e => setEditContent(e.target.value)}
-            style={{ width: "100%", minHeight: "60vh", padding: 16, fontFamily: "var(--font-mono)", fontSize: 14, background: "var(--color-bg)", color: "var(--color-fg)", border: "1px solid var(--color-accent)", borderRadius: 6, resize: "vertical", outline: "none", lineHeight: 1.7 }} />
+          <div data-color-mode="dark">
+            <MDEditor value={editContent} onChange={value => setEditContent(value || "")} height={520} preview="live" textareaProps={{ spellCheck: false }} />
+          </div>
         ) : (
-          <MarkdownView content={body} onNavigate={(id: string) => onSelectPage(id)} />
+          <MarkdownView content={body} onNavigate={(id: string) => onSelectPage(id)} onNavigateTable={(tableId: string) => onSelectTable?.(tableId)} />
         )}
       </div>
     </div>
   );
 }
 
-function MarkdownView({ content, onNavigate }: { content: string; onNavigate?: (id: string) => void }) {
-  const html = mdToHtml(content);
+function MarkdownView({ content, onNavigate, onNavigateTable }: { content: string; onNavigate?: (id: string) => void; onNavigateTable?: (tableId: string) => void }) {
+  const markdown = preprocessWikiLinks(content);
   return (
     <div className="markdown-body"
       style={{ lineHeight: 1.8, fontSize: 15, color: "hsl(160 30% 88%)" }}
-      dangerouslySetInnerHTML={{ __html: html }}
-      onClick={(e) => {
-        const target = e.target as HTMLElement;
-        if (target.tagName === "A" && target.getAttribute("data-wiki")) {
-          e.preventDefault();
-          const id = target.getAttribute("data-wiki")!;
-          onNavigate?.(id);
-        }
-      }}
-    />
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        urlTransform={(url) => {
+          if (url.startsWith("wiki:") || url.startsWith("table:")) return url;
+          return defaultUrlTransform(url);
+        }}
+        components={{
+          a({ href, children, ...props }) {
+            if (href?.startsWith("wiki:")) {
+              const id = decodeURIComponent(href.slice(5));
+              return <a href="#" className="wiki-link" onClick={(e) => { e.preventDefault(); onNavigate?.(id); }}>{children}</a>;
+            }
+            if (href?.startsWith("table:")) {
+              const id = decodeURIComponent(href.slice(6));
+              return <a href="#" className="table-link" onClick={(e) => { e.preventDefault(); onNavigateTable?.(id); }}>{children}</a>;
+            }
+            return <a href={href} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>;
+          },
+        }}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </div>
   );
 }
 
-/// Convert markdown text to HTML with full formatting support
-function mdToHtml(text: string): string {
-  // Protect code blocks from transformation
-  const codeBlocks: string[] = [];
-  let html = text.replace(/```[\s\S]*?```/g, (m) => { codeBlocks.push(m); return `\x00CODE${codeBlocks.length - 1}\x00`; });
-
-  // Escape HTML (except protected blocks)
-  html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  // Bold (must be before italic — ** has higher priority)
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // Italic: use [^*] to prevent eating bold markers
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Wiki links
-  html = html.replace(/\[\[([^\]]+?)\]\]/g, (_: string, inner: string) => {
-    const [id, label] = inner.includes("|") ? inner.split("|") : [inner, inner];
-    return `<a href="#" data-wiki="${id.trim()}" class="wiki-link">${label.trim()}</a>`;
-  });
-  // External links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, text: string, url: string) => {
-    const safe = /^(https?|ftp):/i.test(url) ? url : 'blocked:';
-    return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-  });
-
-  // Block-level: process line by line
-  const lines = html.split("\n");
-  const out: string[] = [];
-  let inList = false;
-  let inPara = false;
-
-  function flushPara() { if (inPara) { out.push('</p>'); inPara = false; } }
-  function flushList() { if (inList) { out.push('</ul>'); inList = false; } }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // Empty line → close all blocks
-    if (!line.trim()) {
-      flushPara(); flushList();
-      out.push('<div style="height:6px"></div>');
-      continue;
-    }
-    // Headings
-    if (/^#### (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^#### (.+)$/, '<h4>$1</h4>')); continue; }
-    if (/^### (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^### (.+)$/, '<h3>$1</h3>')); continue; }
-    if (/^## (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^## (.+)$/, '<h2>$1</h2>')); continue; }
-    if (/^# (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^# (.+)$/, '<h1>$1</h1>')); continue; }
-    // HR
-    if (line.trim() === "---") { flushPara(); flushList(); out.push('<hr/>'); continue; }
-    // Checkboxes
-    if (/^- \[x\] (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^- \[x\] (.+)$/, '<div class="check done"><span>✓</span><s>$1</s></div>')); continue; }
-    if (/^- \[ \] (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^- \[ \] (.+)$/, '<div class="check"><span></span>$1</div>')); continue; }
-    // List item
-    if (/^- (.+)$/.test(line)) {
-      flushPara();
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push(line.replace(/^- (.+)$/, '<li>$1</li>'));
-      continue;
-    }
-    // Blockquote
-    if (/^> (.+)$/.test(line)) { flushPara(); flushList(); out.push(line.replace(/^> (.+)$/, '<blockquote>$1</blockquote>')); continue; }
-    // Normal paragraph text
-    if (!inPara) { out.push('<p>'); inPara = true; } else { out.push('<br/>'); }
-    out.push(line);
-  }
-  flushPara(); flushList();
-
-  html = out.join("");
-  // Restore code blocks
-  html = html.replace(/\x00CODE(\d+)\x00/g, (_, n) => {
-    const code = codeBlocks[parseInt(n)] || "";
-    const lang = code.match(/```(\w*)/)?.[1] || "";
-    const inner = code.replace(/```\w*\n?/, "").replace(/```$/, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    return `<pre><code>${inner}</code></pre>`;
-  });
-
-  return html;
+function preprocessWikiLinks(text: string) {
+  return text
+    .replace(/\[\[table:([^\]]+?)\]\]/g, (_: string, inner: string) => {
+      const [tableId, label] = inner.includes("|") ? inner.split("|") : [inner, inner];
+      return `[${label.trim()}](table:${encodeURIComponent(tableId.trim())})`;
+    })
+    .replace(/\[\[([^\]]+?)\]\]/g, (_: string, inner: string) => {
+      const [id, label] = inner.includes("|") ? inner.split("|") : [inner, inner];
+      return `[${label.trim()}](wiki:${encodeURIComponent(id.trim())})`;
+    });
 }
 
 // ═══════════════════════════════════════════════ LEDGER VIEW
@@ -867,6 +866,35 @@ function StatusBar({ wsName, pageCount, entityCount, edgeCount, compileDone, com
   );
 }
 
+const OCR_MODEL_OPTIONS: Record<string, { v: string; l: string; desc: string }[]> = {
+  "paddleocr-vl": [
+    { v: "PaddleOCR-VL-1.5-8bit", l: "PaddleOCR-VL-1.5-8bit", desc: "MLX spotting, macOS" },
+  ],
+  "paddleocr": [
+    { v: "PP-OCRv5_server", l: "PP-OCRv5 Server", desc: "High accuracy boxes" },
+    { v: "PP-OCRv5_mobile", l: "PP-OCRv5 Mobile", desc: "Smaller local model" },
+    { v: "default", l: "PaddleOCR Default", desc: "Use runtime default" },
+  ],
+  "mineru": [
+    { v: "MinerU2.5", l: "MinerU2.5", desc: "Document parser boxes" },
+  ],
+  "deepseek-ocr": [
+    { v: "DeepSeek-OCR-2", l: "DeepSeek-OCR-2", desc: "Grounding boxes" },
+  ],
+};
+
+function ocrModelOptions(engine: string, current: string) {
+  const options = OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"];
+  if (current && !options.some(o => o.v === current)) {
+    return [{ v: current, l: current, desc: "Configured model" }, ...options];
+  }
+  return options;
+}
+
+function defaultOcrModel(engine: string) {
+  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"])[0].v;
+}
+
 function ConfigModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState("model");
   const [provider, setProvider] = useState("deepseek");
@@ -875,23 +903,34 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [temperature, setTemperature] = useState("0.3");
   const [ocrUrl, setOcrUrl] = useState("");
+  const [ocrEngine, setOcrEngine] = useState("paddleocr-vl");
+  const [ocrModel, setOcrModel] = useState("PaddleOCR-VL-1.5-8bit");
+  const [ocrModelRoot, setOcrModelRoot] = useState("");
+  const [ocrDevice, setOcrDevice] = useState("auto");
+  const [ocrAutoDownload, setOcrAutoDownload] = useState(true);
   const [ocrLang, setOcrLang] = useState("chi_sim+eng");
   const [ocrEnabled, setOcrEnabled] = useState(true);
   const [maxResults, setMaxResults] = useState("5");
   const [saved, setSaved] = useState(false);
+
+  const changeOcrEngine = (value: string) => {
+    setOcrEngine(value);
+    setOcrModel(defaultOcrModel(value));
+  };
 
   // Load current config on mount
   useEffect(() => { (async () => {
     try { const c = await invoke("get_full_config") as any;
       setProvider(c.model?.provider || "deepseek"); setApiKey(c.model?.apiKey || ""); setModel(c.model?.model || ""); setBaseUrl(c.model?.baseUrl || ""); setTemperature(String(c.model?.temperature || 0.3));
       setOcrUrl(c.liteparse?.ocrServerUrl || ""); setOcrLang(c.liteparse?.ocrLanguage || "chi_sim+eng"); setOcrEnabled(c.liteparse?.ocrEnabled !== false);
+      setOcrEngine(c.ocr?.engine || "paddleocr-vl"); setOcrModel(c.ocr?.model || "PaddleOCR-VL-1.5-8bit"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
       setMaxResults(String(c.query?.maxResults || 5));
     } catch {} })();
   }, []);
 
   const save = async () => {
     try {
-      await invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature: parseFloat(temperature) || 0.3, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, maxResults: parseInt(maxResults) || 5 } });
+      await invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature: parseFloat(temperature) || 0.3, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults: parseInt(maxResults) || 5 } });
       setSaved(true); setTimeout(() => { onClose(); window.location.reload(); }, 800);
     } catch (e) { console.error(e); }
   };
@@ -914,7 +953,12 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
               <Field label="Temperature"><input value={temperature} onChange={e => setTemperature(e.target.value)} className="field-input" /></Field>
             </>}
             {tab === "liteparse" && <>
-              <Field label="OCR Server URL"><input value={ocrUrl} onChange={e => setOcrUrl(e.target.value)} placeholder="http://host:port/ocr" className="field-input" /></Field>
+              <Field label="OCR Engine"><select value={ocrEngine} onChange={e => changeOcrEngine(e.target.value)} className="field-input"><option value="paddleocr-vl">PaddleOCR-VL</option><option value="paddleocr">PaddleOCR PP-OCR</option><option value="mineru">MinerU</option><option value="deepseek-ocr">DeepSeek-OCR</option></select></Field>
+              <Field label="Model Root"><input value={ocrModelRoot} onChange={e => setOcrModelRoot(e.target.value)} placeholder="Leave empty for .wiki/models/ocr" className="field-input" /></Field>
+              <Field label="OCR Model"><select value={ocrModel} onChange={e => setOcrModel(e.target.value)} className="field-input">{ocrModelOptions(ocrEngine, ocrModel).map(o => <option key={o.v} value={o.v}>{o.l} — {o.desc}</option>)}</select></Field>
+              <Field label="Device"><select value={ocrDevice} onChange={e => setOcrDevice(e.target.value)} className="field-input"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">MPS</option></select></Field>
+              <Field label="Auto Download"><input type="checkbox" checked={ocrAutoDownload} onChange={e => setOcrAutoDownload(e.target.checked)} /></Field>
+              <Field label="Advanced OCR Server URL"><input value={ocrUrl} onChange={e => setOcrUrl(e.target.value)} placeholder="Optional liteparse-compatible /ocr endpoint" className="field-input" /></Field>
               <Field label="OCR Language"><input value={ocrLang} onChange={e => setOcrLang(e.target.value)} className="field-input" /></Field>
               <Field label="OCR Enabled"><input type="checkbox" checked={ocrEnabled} onChange={e => setOcrEnabled(e.target.checked)} /></Field>
             </>}

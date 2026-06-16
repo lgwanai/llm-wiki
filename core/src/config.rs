@@ -49,6 +49,7 @@ fn default_config() -> Config {
         image_analysis: ImageAnalysisConfig::default(),
         query: QueryConfig::default(),
         logging: LoggingConfig::default(),
+        compile: crate::types::CompileConfig::default(),
     }
 }
 
@@ -78,10 +79,7 @@ pub fn find_config_file() -> Option<PathBuf> {
 
     // 3. ~/.config/llm-wiki/
     if let Some(home) = dirs_home() {
-        let home_config = home
-            .join(".config")
-            .join("llm-wiki")
-            .join(CONFIG_FILENAME);
+        let home_config = home.join(".config").join("llm-wiki").join(CONFIG_FILENAME);
         if home_config.exists() {
             return Some(home_config);
         }
@@ -100,6 +98,25 @@ pub fn find_local_config_file() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Return the config path that should be modified by CLI and desktop settings.
+///
+/// This mirrors discovery where possible so both surfaces mutate the same
+/// effective config: explicit env path, then project-local config, then the
+/// user-level config path.
+pub fn writable_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var(CONFIG_ENV_VAR) {
+        return PathBuf::from(path);
+    }
+    if let Some(local) = find_local_config_file() {
+        return local;
+    }
+    dirs_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join("llm-wiki")
+        .join(CONFIG_FILENAME)
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -146,7 +163,10 @@ fn resolve_project_root() -> PathBuf {
 
     // 2. Local config's parent
     if let Some(local_config) = find_local_config_file() {
-        return local_config.parent().unwrap_or(&PathBuf::from(".")).to_path_buf();
+        return local_config
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .to_path_buf();
     }
 
     // 3. Nearest .wiki/ directory parent
@@ -170,7 +190,11 @@ fn resolve_project_root() -> PathBuf {
 fn expand_env_vars_in_string(value: &str) -> String {
     let re = Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").unwrap();
     re.replace_all(value, |caps: &regex::Captures| {
-        let var_name = caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str()).unwrap_or("");
+        let var_name = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str())
+            .unwrap_or("");
         std::env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
     })
     .to_string()
@@ -252,9 +276,7 @@ fn normalize_config(config: &mut serde_yaml::Value) {
     };
 
     // ── Phase 3: Apply legacy overrides ──
-    let model = map
-        .get_mut("model")
-        .unwrap(); // guaranteed to exist from above
+    let model = map.get_mut("model").unwrap(); // guaranteed to exist from above
 
     if let Some(serde_yaml::Value::Mapping(llm_map)) = legacy_llm {
         if let serde_yaml::Value::Mapping(model_map) = model {
@@ -322,9 +344,7 @@ fn normalize_config(config: &mut serde_yaml::Value) {
     };
 
     if let Some(legacy_val) = legacy_for_backend {
-        let ocr = map
-            .get_mut("ocr")
-            .unwrap();
+        let ocr = map.get_mut("ocr").unwrap();
         if let serde_yaml::Value::Mapping(ocr_map) = ocr {
             let options = ocr_map
                 .entry("options".into())
@@ -404,13 +424,11 @@ pub fn get_wiki_dir() -> PathBuf {
 }
 
 fn resolve_wiki_dir() -> PathBuf {
-    let wiki_dir_str = std::env::var(WIKI_DIR_ENV_VAR)
-        .ok()
-        .unwrap_or_else(|| {
-            // Avoid recursive lock by loading config from cache or fresh
-            let config = load_config();
-            config.wiki_dir.clone()
-        });
+    let wiki_dir_str = std::env::var(WIKI_DIR_ENV_VAR).ok().unwrap_or_else(|| {
+        // Avoid recursive lock by loading config from cache or fresh
+        let config = load_config();
+        config.wiki_dir.clone()
+    });
 
     let wiki_dir = PathBuf::from(&wiki_dir_str);
 
@@ -538,10 +556,7 @@ pub fn get_api_url() -> String {
     match llm.provider.as_str() {
         "ollama" => format!("{}/api/chat", llm.base_url.trim_end_matches('/')),
         "custom" if !llm.api_url.is_empty() => llm.api_url,
-        _ => format!(
-            "{}/v1/chat/completions",
-            llm.base_url.trim_end_matches('/')
-        ),
+        _ => format!("{}/v1/chat/completions", llm.base_url.trim_end_matches('/')),
     }
 }
 
@@ -603,6 +618,87 @@ pub fn create_default_config(dest: &Path) -> WikiResult<PathBuf> {
     Ok(dest.to_path_buf())
 }
 
+/// Set dotted configuration keys in the writable config file.
+///
+/// Example keys: `ocr.engine`, `ocr.model`, `model.api_key`,
+/// `liteparse.ocr_enabled`.
+pub fn set_config_values(values: &[(String, String)]) -> WikiResult<PathBuf> {
+    let path = writable_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut existing: serde_yaml::Value = if path.exists() {
+        serde_yaml::from_str(&std::fs::read_to_string(&path)?)?
+    } else {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    };
+
+    for (key, raw) in values {
+        let value = parse_config_value(raw);
+        set_dotted_yaml(&mut existing, key, value)?;
+    }
+
+    let yaml = serde_yaml::to_string(&existing)?;
+    std::fs::write(&path, yaml)?;
+    reset_config();
+    Ok(path)
+}
+
+fn parse_config_value(raw: &str) -> serde_yaml::Value {
+    if raw.eq_ignore_ascii_case("true") {
+        return serde_yaml::Value::Bool(true);
+    }
+    if raw.eq_ignore_ascii_case("false") {
+        return serde_yaml::Value::Bool(false);
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return serde_yaml::Value::Number(i.into());
+    }
+    if let Ok(f) = raw.parse::<f64>() {
+        if let Ok(v) = serde_yaml::to_value(f) {
+            return v;
+        }
+    }
+    serde_yaml::Value::String(raw.to_string())
+}
+
+fn set_dotted_yaml(
+    root: &mut serde_yaml::Value,
+    key: &str,
+    value: serde_yaml::Value,
+) -> WikiResult<()> {
+    let parts: Vec<&str> = key.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(WikiError::Config("Config key cannot be empty".into()));
+    }
+
+    let mut current = root;
+    for part in &parts[..parts.len() - 1] {
+        if !matches!(current, serde_yaml::Value::Mapping(_)) {
+            return Err(WikiError::Config(format!(
+                "Cannot set '{key}': '{part}' is not a mapping (it is a scalar value). \
+                 Remove or rename the conflicting key before setting nested values under it."
+            )));
+        }
+        let map = current.as_mapping_mut().unwrap();
+        current = map
+            .entry(serde_yaml::Value::String((*part).to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+
+    if !matches!(current, serde_yaml::Value::Mapping(_)) {
+        return Err(WikiError::Config(format!(
+            "Cannot set '{key}': leaf path conflicts with an existing scalar value."
+        )));
+    }
+    current.as_mapping_mut().unwrap().insert(
+        serde_yaml::Value::String(parts[parts.len() - 1].to_string()),
+        value,
+    );
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Validation
 // ═══════════════════════════════════════════════════════════════════════════
@@ -637,7 +733,15 @@ pub fn validate_config(config: &Config) -> Vec<String> {
         ));
     }
 
-    let valid_backends = ["mineru", "deepseek", "logics", "paddle", "api"];
+    let valid_backends = [
+        "mineru",
+        "deepseek",
+        "logics",
+        "paddle",
+        "paddleocr",
+        "deepseek-ocr",
+        "api",
+    ];
     if !valid_backends.contains(&config.ocr.backend.as_str()) {
         issues.push(format!(
             "ocr.backend: '{}' is invalid — must be one of {:?}",
@@ -649,6 +753,14 @@ pub fn validate_config(config: &Config) -> Vec<String> {
         if config.ocr.api_model.is_empty() {
             issues.push("ocr.api_model: required when mode is 'api'".into());
         }
+    }
+
+    let valid_ocr_engines = ["paddleocr", "paddleocr-vl", "mineru", "deepseek-ocr"];
+    if !valid_ocr_engines.contains(&config.ocr.engine.as_str()) {
+        issues.push(format!(
+            "ocr.engine: '{}' is invalid — must be one of {:?}",
+            config.ocr.engine, valid_ocr_engines
+        ));
     }
 
     // Image analysis validation
@@ -712,8 +824,8 @@ pub fn print_config() {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_expand_env_vars_simple() {
@@ -735,11 +847,7 @@ mod tests {
         let over = serde_yaml::from_str("b:\n  d: 3\ne: 4").unwrap();
         deep_merge(&mut base, over);
 
-        let result: HashMap<String, serde_yaml::Value> =
-            serde_yaml::from_value(base).unwrap();
-        assert_eq!(
-            result.get("a").and_then(|v| v.as_i64()),
-            Some(1)
-        );
+        let result: HashMap<String, serde_yaml::Value> = serde_yaml::from_value(base).unwrap();
+        assert_eq!(result.get("a").and_then(|v| v.as_i64()), Some(1));
     }
 }

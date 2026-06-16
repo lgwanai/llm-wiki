@@ -11,29 +11,39 @@ use llm_wiki_core::config;
 use llm_wiki_core::error::WikiResult;
 
 fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cli = Cli::parse();
 
     let result = match cli.command {
         Commands::Init => cmd_init(),
-        Commands::Config { init, check } => cmd_config(init, check),
-        Commands::Compile { source, source_type, force, dry_run, depth, jobs } => {
-            cmd_compile(source, source_type, force, dry_run, depth, jobs)
-        }
-        Commands::Query { question, file_back, format, no_synthesis, debug_search } => {
-            cmd_query(question, file_back, format, !no_synthesis, debug_search)
-        }
+        Commands::Config { init, check, set } => cmd_config(init, check, set),
+        Commands::Compile {
+            source,
+            source_type,
+            force,
+            dry_run,
+            depth,
+            jobs,
+        } => cmd_compile(source, source_type, force, dry_run, depth, jobs),
+        Commands::Query {
+            question,
+            file_back,
+            format,
+            no_synthesis,
+            debug_search,
+        } => cmd_query(question, file_back, format, !no_synthesis, debug_search),
         Commands::Search { cmd } => cmd_search(cmd),
-        Commands::Benchmark { file, method, top_k, output } => {
-            cmd_benchmark(file, method, top_k, output)
-        }
+        Commands::Benchmark {
+            file,
+            method,
+            top_k,
+            output,
+        } => cmd_benchmark(file, method, top_k, output),
         Commands::Lint { auto_heal } => cmd_lint(auto_heal),
         Commands::Bulk { cmd } => cmd_bulk(cmd),
         Commands::Ledger { cmd } => cmd_ledger(cmd),
+        Commands::Table { cmd } => cmd_table(cmd),
         Commands::Consolidate { tiers, decay_only } => cmd_consolidate(tiers, decay_only),
         Commands::Status => cmd_status(),
         Commands::Update => cmd_update(),
@@ -72,7 +82,10 @@ fn cmd_init() -> WikiResult<()> {
     // Create index.md if not exists
     let index_file = wiki_dir.join("pages/index.md");
     if !index_file.exists() {
-        std::fs::write(&index_file, "# Wiki Index\n\nWelcome to your knowledge base.\n")?;
+        std::fs::write(
+            &index_file,
+            "# Wiki Index\n\nWelcome to your knowledge base.\n",
+        )?;
     }
 
     // Create log.md if not exists
@@ -88,10 +101,7 @@ fn cmd_init() -> WikiResult<()> {
     // Create schema.md if not exists
     let schema_file = wiki_dir.join("schema.md");
     if !schema_file.exists() {
-        std::fs::write(
-            &schema_file,
-            include_str!("../templates/schema.md"),
-        )?;
+        std::fs::write(&schema_file, include_str!("../templates/schema.md"))?;
     }
 
     println!("Wiki initialized: {} directories created", dirs.len());
@@ -99,7 +109,7 @@ fn cmd_init() -> WikiResult<()> {
     Ok(())
 }
 
-fn cmd_config(init: bool, check: bool) -> WikiResult<()> {
+fn cmd_config(init: bool, check: bool, set: Vec<String>) -> WikiResult<()> {
     if init {
         let dest = std::env::current_dir()?.join(config::CONFIG_FILENAME);
         match config::create_default_config(&dest) {
@@ -113,6 +123,20 @@ fn cmd_config(init: bool, check: bool) -> WikiResult<()> {
                 std::process::exit(1);
             }
         }
+    }
+
+    if !set.is_empty() {
+        let mut values = Vec::new();
+        for item in set {
+            let Some((key, value)) = item.split_once('=') else {
+                eprintln!("Invalid --set value: {item}. Expected KEY=VALUE.");
+                std::process::exit(1);
+            };
+            values.push((key.trim().to_string(), value.trim().to_string()));
+        }
+        let path = config::set_config_values(&values)?;
+        println!("Config updated: {}", path.display());
+        return Ok(());
     }
 
     if check {
@@ -185,7 +209,10 @@ fn cmd_query(
     println!("{}", result.answer);
     if debug_search {
         if let Some(dbg) = &result.debug_search {
-            println!("\n--- DEBUG ---\n{}", serde_json::to_string_pretty(dbg).unwrap_or_default());
+            println!(
+                "\n--- DEBUG ---\n{}",
+                serde_json::to_string_pretty(dbg).unwrap_or_default()
+            );
         }
     }
     Ok(())
@@ -196,7 +223,10 @@ fn cmd_search(cmd: llm_wiki_core::cli::SearchCmd) -> WikiResult<()> {
     match cmd {
         llm_wiki_core::cli::SearchCmd::Doctor => {
             let report = search::search_doctor();
-            println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
         }
         llm_wiki_core::cli::SearchCmd::Eval { file: _, limit: _ } => {
             println!("Search eval: use benchmark command instead");
@@ -239,7 +269,11 @@ fn cmd_bulk(cmd: llm_wiki_core::cli::BulkCmd) -> WikiResult<()> {
         }
         BulkCmd::Clean { dry_run } => {
             let orphans = bulk::clean_orphans(dry_run)?;
-            println!("Orphans: {} ({})", orphans.len(), if dry_run { "dry-run" } else { "removed" });
+            println!(
+                "Orphans: {} ({})",
+                orphans.len(),
+                if dry_run { "dry-run" } else { "removed" }
+            );
         }
         BulkCmd::Merge { .. } => println!("Merge: not yet implemented"),
         BulkCmd::Export { .. } => println!("Export: not yet implemented"),
@@ -253,14 +287,34 @@ fn cmd_ledger(cmd: llm_wiki_core::cli::LedgerCmd) -> WikiResult<()> {
     match cmd {
         LedgerCmd::List => {
             let tables = ledger::list_tables()?;
-            println!("{}", serde_json::to_string_pretty(&tables).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tables).unwrap_or_default()
+            );
         }
         LedgerCmd::Show { table } => {
             let info = ledger::show_table(&table)?;
-            println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&info).unwrap_or_default()
+            );
         }
-        LedgerCmd::Create { display_name, fields, unique, auto_increment, table_name, description } => {
-            let name = ledger::create_table(&display_name, &fields, unique.as_deref(), auto_increment, table_name.as_deref(), &description)?;
+        LedgerCmd::Create {
+            display_name,
+            fields,
+            unique,
+            auto_increment,
+            table_name,
+            description,
+        } => {
+            let name = ledger::create_table(
+                &display_name,
+                &fields,
+                unique.as_deref(),
+                auto_increment,
+                table_name.as_deref(),
+                &description,
+            )?;
             println!("Created table: {name}");
         }
         LedgerCmd::Insert { table, data, batch } => {
@@ -273,11 +327,16 @@ fn cmd_ledger(cmd: llm_wiki_core::cli::LedgerCmd) -> WikiResult<()> {
         }
         LedgerCmd::Stats { table } => {
             let stats = ledger::table_stats(table.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&stats).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&stats).unwrap_or_default()
+            );
         }
         LedgerCmd::Export { table, output } => {
             let csv = ledger::export_csv(&table, output.as_deref())?;
-            if output.is_none() { println!("{csv}"); }
+            if output.is_none() {
+                println!("{csv}");
+            }
         }
         LedgerCmd::Import { file, name } => {
             let t = ledger::import_csv(&file, name.as_deref())?;
@@ -286,16 +345,61 @@ fn cmd_ledger(cmd: llm_wiki_core::cli::LedgerCmd) -> WikiResult<()> {
         LedgerCmd::Sql { sql_text } => {
             use llm_wiki_core::table_query;
             let rows = table_query::execute_sql(&sql_text)?;
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
         }
-        LedgerCmd::Ask { table, question, .. } => {
+        LedgerCmd::Ask {
+            table, question, ..
+        } => {
             use llm_wiki_core::table_query;
             let sql = table_query::ask_table(&table, &question)?;
             println!("SQL: {sql}");
             let rows = table_query::execute_sql(&sql)?;
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
         }
         _ => println!("Command not yet implemented"),
+    }
+    Ok(())
+}
+
+fn cmd_table(cmd: llm_wiki_core::cli::TableCmd) -> WikiResult<()> {
+    use llm_wiki_core::{cli::TableCmd, ledger, table_query};
+    match cmd {
+        TableCmd::List => {
+            let tables = ledger::list_tables()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tables).unwrap_or_default()
+            );
+        }
+        TableCmd::Show { table } => {
+            let info = ledger::show_table(&table)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&info).unwrap_or_default()
+            );
+        }
+        TableCmd::Ask { table, question } => {
+            let sql = table_query::ask_table(&table, &question)?;
+            println!("SQL: {sql}");
+            let rows = table_query::execute_sql(&sql)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
+        }
+        TableCmd::Schema { table } => {
+            let info = ledger::show_table(&table)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&info).unwrap_or_default()
+            );
+        }
     }
     Ok(())
 }
@@ -303,7 +407,10 @@ fn cmd_ledger(cmd: llm_wiki_core::cli::LedgerCmd) -> WikiResult<()> {
 fn cmd_consolidate(tiers: String, decay_only: bool) -> WikiResult<()> {
     use llm_wiki_core::consolidate;
     let result = consolidate::consolidate(&tiers, decay_only)?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -335,7 +442,10 @@ fn cmd_status() -> WikiResult<()> {
         }
     });
 
-    println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&status).unwrap_or_default()
+    );
     Ok(())
 }
 

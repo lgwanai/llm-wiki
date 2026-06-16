@@ -5,6 +5,35 @@ import { Settings, Cpu, Search, Globe, Key, Zap, Eye, EyeOff, Languages, Chevron
 let _invoke: any = null;
 async function invoke(cmd: string, args?: any) { if (!_invoke) { const m = await import("@tauri-apps/api/core"); _invoke = m.invoke; } return _invoke(cmd, args); }
 
+const OCR_MODEL_OPTIONS: Record<string, { v: string; l: string; desc: string }[]> = {
+  "paddleocr-vl": [
+    { v: "PaddleOCR-VL-1.5-8bit", l: "PaddleOCR-VL-1.5-8bit", desc: "MLX spotting, macOS" },
+  ],
+  "paddleocr": [
+    { v: "PP-OCRv5_server", l: "PP-OCRv5 Server", desc: "High accuracy boxes" },
+    { v: "PP-OCRv5_mobile", l: "PP-OCRv5 Mobile", desc: "Smaller local model" },
+    { v: "default", l: "PaddleOCR Default", desc: "Use runtime default" },
+  ],
+  "mineru": [
+    { v: "MinerU2.5", l: "MinerU2.5", desc: "Document parser boxes" },
+  ],
+  "deepseek-ocr": [
+    { v: "DeepSeek-OCR-2", l: "DeepSeek-OCR-2", desc: "Grounding boxes" },
+  ],
+};
+
+function ocrModelOptions(engine: string, current: string) {
+  const options = OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"];
+  if (current && !options.some(o => o.v === current)) {
+    return [{ v: current, l: current, desc: "Configured model" }, ...options];
+  }
+  return options;
+}
+
+function defaultOcrModel(engine: string) {
+  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"])[0].v;
+}
+
 function SettingsWindow() {
   const [section, setSection] = useState("model");
   const [provider, setProvider] = useState("deepseek");
@@ -13,19 +42,32 @@ function SettingsWindow() {
   const [baseUrl, setBaseUrl] = useState("");
   const [temperature, setTemperature] = useState(0.3);
   const [ocrUrl, setOcrUrl] = useState("");
+  const [ocrEngine, setOcrEngine] = useState("paddleocr-vl");
+  const [ocrModel, setOcrModel] = useState("PaddleOCR-VL-1.5-8bit");
+  const [ocrModelRoot, setOcrModelRoot] = useState("");
+  const [ocrDevice, setOcrDevice] = useState("auto");
+  const [ocrAutoDownload, setOcrAutoDownload] = useState(true);
   const [ocrLang, setOcrLang] = useState("chi_sim+eng");
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const [maxResults, setMaxResults] = useState(5);
+  const [stripSensitive, setStripSensitive] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const saveTimer = useRef<any>(null);
+
+  const changeOcrEngine = (value: string) => {
+    setOcrEngine(value);
+    setOcrModel(defaultOcrModel(value));
+  };
 
   // Load config on mount
   useEffect(() => { (async () => {
     try { const c = await invoke("get_full_config") as any;
       setProvider(c.model?.provider || "deepseek"); setApiKey(c.model?.apiKey || ""); setModel(c.model?.model || ""); setBaseUrl(c.model?.baseUrl || ""); setTemperature(c.model?.temperature || 0.3);
       setOcrUrl(c.liteparse?.ocrServerUrl || ""); setOcrLang(c.liteparse?.ocrLanguage || "chi_sim+eng"); setOcrEnabled(c.liteparse?.ocrEnabled === true);
+      setOcrEngine(c.ocr?.engine || "paddleocr-vl"); setOcrModel(c.ocr?.model || "PaddleOCR-VL-1.5-8bit"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
       setMaxResults(c.query?.maxResults || 5);
+      setStripSensitive(c.compile?.stripSensitive === true);
       setLoaded(true);
     } catch {} })();
   }, []);
@@ -35,15 +77,16 @@ function SettingsWindow() {
     if (!loaded) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, maxResults } });
+      invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults, stripSensitive } });
     }, 400);
   };
 
-  useEffect(autoSave, [provider, apiKey, model, baseUrl, temperature, ocrUrl, ocrLang, ocrEnabled, maxResults]);
+  useEffect(autoSave, [provider, apiKey, model, baseUrl, temperature, ocrUrl, ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults, stripSensitive]);
 
   const sections = [
     { id: "model", label: "Model", icon: <Cpu size={15} />, desc: "LLM provider & API settings" },
     { id: "ocr", label: "OCR", icon: <Eye size={15} />, desc: "Liteparse document OCR" },
+    { id: "compile", label: "Compile", icon: <Zap size={15} />, desc: "Compilation behaviour" },
     { id: "query", label: "Query", icon: <Search size={15} />, desc: "Search & retrieval" },
   ];
 
@@ -114,8 +157,32 @@ function SettingsWindow() {
             <SectionTitle icon={<Eye size={16} />} title="Liteparse OCR" subtitle="Document OCR for image-based PDFs" />
             <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
               <ToggleField label="OCR Enabled" value={ocrEnabled} onChange={setOcrEnabled} desc="Enable OCR for text-sparse pages and embedded images" />
-              <TextField label="OCR Server URL" value={ocrUrl} onChange={setOcrUrl} placeholder="http://host:port/ocr — leave empty for text-only" />
+              <SelectField label="OCR Engine" value={ocrEngine} onChange={changeOcrEngine} options={[
+                { v: "paddleocr-vl", l: "PaddleOCR-VL", desc: "Local spotting model" },
+                { v: "paddleocr", l: "PaddleOCR PP-OCR", desc: "Local text boxes" },
+                { v: "mineru", l: "MinerU", desc: "Local document parser boxes" },
+                { v: "deepseek-ocr", l: "DeepSeek-OCR", desc: "Local grounding boxes" },
+              ]} />
+              <TextField label="Model Root" value={ocrModelRoot} onChange={setOcrModelRoot} placeholder="Leave empty for .wiki/models/ocr" />
+              <SelectField label="OCR Model" value={ocrModel} onChange={setOcrModel} options={ocrModelOptions(ocrEngine, ocrModel)} />
+              <SelectField label="Device" value={ocrDevice} onChange={setOcrDevice} options={[
+                { v: "auto", l: "Auto", desc: "Detect automatically" },
+                { v: "cpu", l: "CPU", desc: "Most compatible" },
+                { v: "cuda", l: "CUDA", desc: "NVIDIA GPU" },
+                { v: "mps", l: "MPS", desc: "Apple Silicon" },
+              ]} />
+              <ToggleField label="Auto Download" value={ocrAutoDownload} onChange={setOcrAutoDownload} desc="Create the local runtime and download OCR model weights when first used" />
+              <TextField label="Advanced OCR Server URL" value={ocrUrl} onChange={setOcrUrl} placeholder="Optional liteparse-compatible /ocr endpoint" />
               <TextField label="OCR Language" value={ocrLang} onChange={setOcrLang} placeholder="chi_sim+eng" />
+            </div>
+          </div>
+        )}
+
+        {section === "compile" && (
+          <div style={{ maxWidth: 480 }}>
+            <SectionTitle icon={<Zap size={16} />} title="Compile" subtitle="Document compilation behaviour" />
+            <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+              <ToggleField label="Strip Sensitive Data" value={stripSensitive} onChange={setStripSensitive} desc="Redact API keys, tokens, passwords and emails from source content before sending to LLM. Off by default." />
             </div>
           </div>
         )}

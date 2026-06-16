@@ -11,7 +11,9 @@ pub fn update_from_git() -> WikiResult<()> {
         }
         Err(e) => {
             eprintln!("Git pull failed: {e}");
-            Err(crate::error::WikiError::Internal(format!("Update failed: {e}")))
+            Err(crate::error::WikiError::Internal(format!(
+                "Update failed: {e}"
+            )))
         }
     }
 }

@@ -16,8 +16,16 @@ const RRF_K: f64 = 60.0;
 
 /// All page subdirectories to search.
 const PAGE_SUBDIRS: &[&str] = &[
-    "concepts", "entities", "models", "techniques", "frameworks",
-    "benchmarks", "papers", "decisions", "sessions", "patterns",
+    "concepts",
+    "entities",
+    "models",
+    "techniques",
+    "frameworks",
+    "benchmarks",
+    "papers",
+    "decisions",
+    "sessions",
+    "patterns",
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -90,7 +98,12 @@ pub fn build_bm25_index() -> HashMap<String, Bm25Doc> {
         }
         index.insert(
             path.to_string_lossy().to_string(),
-            Bm25Doc { path: path.to_string_lossy().to_string(), tokens, freqs, length },
+            Bm25Doc {
+                path: path.to_string_lossy().to_string(),
+                tokens,
+                freqs,
+                length,
+            },
         );
     }
     index
@@ -105,7 +118,11 @@ struct Bm25Doc {
 }
 
 /// Search BM25 index and return scored results.
-pub fn bm25_search(query: &str, index: &HashMap<String, Bm25Doc>, limit: usize) -> Vec<SearchResult> {
+pub fn bm25_search(
+    query: &str,
+    index: &HashMap<String, Bm25Doc>,
+    limit: usize,
+) -> Vec<SearchResult> {
     let query_terms: Vec<String> = search_tokenize::tokenize(query)
         .into_iter()
         .map(|t| search_tokenize::stem(&t))
@@ -117,7 +134,11 @@ pub fn bm25_search(query: &str, index: &HashMap<String, Bm25Doc>, limit: usize) 
 
     let num_docs = index.len() as f64;
     let total_len: usize = index.values().map(|d| d.length).sum();
-    let avg_dl = if num_docs > 0.0 { total_len as f64 / num_docs } else { 1.0 };
+    let avg_dl = if num_docs > 0.0 {
+        total_len as f64 / num_docs
+    } else {
+        1.0
+    };
 
     // Document frequency per term
     let mut doc_freq: HashMap<&str, usize> = HashMap::new();
@@ -174,19 +195,42 @@ pub fn build_metadata_index() -> Vec<MetadataEntry> {
     let mut items = Vec::new();
     for path in known_page_paths() {
         let (fm, body) = read_page_parts(&path);
-        let title = body.lines().find(|l| l.starts_with("# "))
+        let title = body
+            .lines()
+            .find(|l| l.starts_with("# "))
             .map(|l| l[2..].trim().to_string())
-            .or_else(|| fm.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                fm.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_default();
 
-        let file_id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let file_id = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let entry = MetadataEntry {
-            id: fm.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(&file_id).to_string(),
+            id: fm
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&file_id)
+                .to_string(),
             name: title,
-            entity_type: fm.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            entity_type: fm
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             aliases: list_from_yaml(&fm, "aliases"),
             keywords: list_from_yaml(&fm, "keywords"),
-            summary: fm.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            summary: fm
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             questions: list_from_yaml(&fm, "questions"),
             facts: list_from_yaml(&fm, "facts"),
             path: path.to_string_lossy().to_string(),
@@ -212,7 +256,8 @@ pub struct MetadataEntry {
 fn list_from_yaml(fm: &HashMap<String, serde_yaml::Value>, key: &str) -> Vec<String> {
     fm.get(key)
         .map(|v| match v {
-            serde_yaml::Value::Sequence(s) => s.iter()
+            serde_yaml::Value::Sequence(s) => s
+                .iter()
                 .filter_map(|i| i.as_str().map(|s| s.to_string()))
                 .collect(),
             serde_yaml::Value::String(s) => vec![s.clone()],
@@ -283,8 +328,16 @@ pub fn metadata_search(query: &str, index: &[MetadataEntry], limit: usize) -> Ve
                 stream: SearchStream::Metadata,
                 rrf_score: None,
                 title: Some(entry.name.clone()),
-                summary: if entry.summary.is_empty() { None } else { Some(entry.summary.clone()) },
-                entity_type: if entry.entity_type.is_empty() { None } else { Some(entry.entity_type.clone()) },
+                summary: if entry.summary.is_empty() {
+                    None
+                } else {
+                    Some(entry.summary.clone())
+                },
+                entity_type: if entry.entity_type.is_empty() {
+                    None
+                } else {
+                    Some(entry.entity_type.clone())
+                },
                 stream_ranks: HashMap::new(),
                 stream_scores: HashMap::new(),
             }
@@ -311,7 +364,8 @@ pub fn graph_search(query: &str, limit: usize) -> Vec<SearchResult> {
         } else if name.contains(&q) || q.contains(&name) {
             score += 5.0;
         } else {
-            let match_count = q.split_whitespace()
+            let match_count = q
+                .split_whitespace()
                 .filter(|t| name.contains(t) || eid.contains(t))
                 .count();
             score += match_count as f64 * 2.0;
@@ -363,7 +417,9 @@ pub fn reciprocal_rank_fusion(
 
             *doc_scores.entry(key.clone()).or_insert(0.0) += rrf_contrib;
 
-            let entry = doc_data.entry(key.clone()).or_insert_with(|| result.clone());
+            let entry = doc_data
+                .entry(key.clone())
+                .or_insert_with(|| result.clone());
             entry.stream_ranks.insert(stream.to_string(), rank + 1);
             entry.stream_scores.insert(stream.to_string(), result.score);
         }
@@ -379,9 +435,8 @@ pub fn reciprocal_rank_fusion(
 
     // Set RRF scores
     for result in &mut fused {
-        result.rrf_score = Some(
-            (doc_scores.get(&result.id).copied().unwrap_or(0.0) * 1000.0).round() / 1000.0,
-        );
+        result.rrf_score =
+            Some((doc_scores.get(&result.id).copied().unwrap_or(0.0) * 1000.0).round() / 1000.0);
     }
 
     fused
@@ -391,9 +446,10 @@ pub fn reciprocal_rank_fusion(
 // Unified search
 // ═══════════════════════════════════════════════════════════════════════════
 
-
-static BM25_CACHE: std::sync::Mutex<Option<(u64, HashMap<String, Bm25Doc>)>> = std::sync::Mutex::new(None);
-static META_CACHE: std::sync::Mutex<Option<(u64, Vec<MetadataEntry>)>> = std::sync::Mutex::new(None);
+static BM25_CACHE: std::sync::Mutex<Option<(u64, HashMap<String, Bm25Doc>)>> =
+    std::sync::Mutex::new(None);
+static META_CACHE: std::sync::Mutex<Option<(u64, Vec<MetadataEntry>)>> =
+    std::sync::Mutex::new(None);
 
 /// Get a hash of all page paths + mtimes to detect changes
 fn page_hash() -> u64 {
@@ -405,7 +461,10 @@ fn page_hash() -> u64 {
         path.hash(&mut h);
         if let Ok(m) = std::fs::metadata(&path) {
             if let Ok(t) = m.modified() {
-                t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().hash(&mut h);
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .hash(&mut h);
             }
         }
     }
@@ -413,44 +472,57 @@ fn page_hash() -> u64 {
 }
 
 fn get_cached_bm25() -> HashMap<String, Bm25Doc> {
-    let hash = page_hash();
+    get_cached_bm25_with_hash(page_hash())
+}
+
+fn get_cached_bm25_with_hash(hash: u64) -> HashMap<String, Bm25Doc> {
     if let Ok(cache) = BM25_CACHE.lock() {
         if let Some((cached_hash, ref idx)) = *cache {
-            if cached_hash == hash { return idx.clone(); }
+            if cached_hash == hash {
+                return idx.clone();
+            }
         }
     }
     let idx = build_bm25_index();
-    if let Ok(mut cache) = BM25_CACHE.lock() { *cache = Some((hash, idx.clone())); }
+    if let Ok(mut cache) = BM25_CACHE.lock() {
+        *cache = Some((hash, idx.clone()));
+    }
     idx
 }
 
 fn get_cached_metadata() -> Vec<MetadataEntry> {
-    let hash = page_hash();
+    get_cached_metadata_with_hash(page_hash())
+}
+
+fn get_cached_metadata_with_hash(hash: u64) -> Vec<MetadataEntry> {
     if let Ok(cache) = META_CACHE.lock() {
         if let Some((cached_hash, ref idx)) = *cache {
-            if cached_hash == hash { return idx.clone(); }
+            if cached_hash == hash {
+                return idx.clone();
+            }
         }
     }
     let idx = build_metadata_index();
-    if let Ok(mut cache) = META_CACHE.lock() { *cache = Some((hash, idx.clone())); }
+    if let Ok(mut cache) = META_CACHE.lock() {
+        *cache = Some((hash, idx.clone()));
+    }
     idx
 }
 
-pub fn search(
-    query: &str,
-    enabled_streams: &HashSet<String>,
-    limit: usize,
-) -> Vec<SearchResult> {
+pub fn search(query: &str, enabled_streams: &HashSet<String>, limit: usize) -> Vec<SearchResult> {
     let mut stream_results: Vec<(SearchStream, Vec<SearchResult>)> = Vec::new();
 
+    // Compute the page hash once and share between both caches
+    let hash = page_hash();
+
     if enabled_streams.contains("bm25") {
-        let index = get_cached_bm25();
+        let index = get_cached_bm25_with_hash(hash);
         let results = bm25_search(query, &index, limit);
         stream_results.push((SearchStream::Bm25, results));
     }
 
     if enabled_streams.contains("metadata") {
-        let meta_index = get_cached_metadata();
+        let meta_index = get_cached_metadata_with_hash(hash);
         let results = metadata_search(query, &meta_index, limit);
         stream_results.push((SearchStream::Metadata, results));
     }

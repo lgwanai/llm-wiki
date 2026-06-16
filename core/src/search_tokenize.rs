@@ -12,10 +12,13 @@ fn get_jieba() -> &'static jieba_rs::Jieba {
 
 /// Tokenize text: jieba for Chinese text, word-regex for English.
 pub fn tokenize(text: &str) -> Vec<String> {
-    let cjk_count = text.chars().filter(|c| {
-        let cp = *c as u32;
-        (0x4E00..=0x9FFF).contains(&cp) || (0x3400..=0x4DBF).contains(&cp)
-    }).count();
+    let cjk_count = text
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            (0x4E00..=0x9FFF).contains(&cp) || (0x3400..=0x4DBF).contains(&cp)
+        })
+        .count();
 
     let mut tokens: Vec<String> = Vec::new();
 
@@ -55,10 +58,18 @@ pub fn stem(word: &str) -> String {
     }
 
     let w = word.to_lowercase();
-    if w.len() > 5 && w.ends_with("ing") { return w[..w.len() - 3].to_string(); }
-    if w.len() > 4 && w.ends_with("ed") { return w[..w.len() - 2].to_string(); }
-    if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") { return w[..w.len() - 1].to_string(); }
-    if w.len() > 5 && w.ends_with("ion") { return w[..w.len() - 3].to_string(); }
+    if w.len() > 5 && w.ends_with("ing") {
+        return w[..w.len() - 3].to_string();
+    }
+    if w.len() > 4 && w.ends_with("ed") {
+        return w[..w.len() - 2].to_string();
+    }
+    if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") {
+        return w[..w.len() - 1].to_string();
+    }
+    if w.len() > 5 && w.ends_with("ion") {
+        return w[..w.len() - 3].to_string();
+    }
     w
 }
 
@@ -67,11 +78,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_stem_ing() { assert_eq!(stem("running"), "runn"); }
+    fn test_stem_ing() {
+        assert_eq!(stem("running"), "runn");
+    }
     #[test]
-    fn test_stem_ed() { assert_eq!(stem("tested"), "test"); }
+    fn test_stem_ed() {
+        assert_eq!(stem("tested"), "test");
+    }
     #[test]
-    fn test_stem_plural() { assert_eq!(stem("tests"), "test"); }
+    fn test_stem_plural() {
+        assert_eq!(stem("tests"), "test");
+    }
     #[test]
     fn test_tokenize_english() {
         let tokens = tokenize("The quick brown fox");

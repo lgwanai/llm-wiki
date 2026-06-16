@@ -8,7 +8,8 @@ pub fn ask_table(table: &str, question: &str) -> WikiResult<String> {
     let info = ledger::show_table(table)?;
     let fields = info.get("fields").and_then(|v| v.as_str()).unwrap_or("[]");
 
-    let system = "You are a DuckDB SQL expert. Generate only a valid SQL SELECT query. No explanations.";
+    let system =
+        "You are a DuckDB SQL expert. Generate only a valid SQL SELECT query. No explanations.";
     let user = format!(
         "Table: {table}\nSchema fields (JSON): {fields}\nQuestion: {question}\n\nGenerate a DuckDB SELECT query to answer this question:"
     );
@@ -38,7 +39,8 @@ pub fn execute_sql(sql: &str) -> WikiResult<Vec<serde_json::Value>> {
     let rows = stmt.query_map([], |row| {
         let mut obj = serde_json::Map::new();
         for (i, col) in col_names.iter().enumerate() {
-            let val: String = row.get::<_, duckdb::types::Value>(i)
+            let val: String = row
+                .get::<_, duckdb::types::Value>(i)
                 .map(|v| format!("{v:?}"))
                 .unwrap_or_else(|_| "NULL".to_string());
             obj.insert(col.clone(), serde_json::Value::String(val));

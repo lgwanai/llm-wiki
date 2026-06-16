@@ -3,7 +3,13 @@
 use crate::types::SourceType;
 
 const CONCEPT_LIKE: &[&str] = &[
-    "concept", "technique", "model", "framework", "benchmark", "paper", "pattern",
+    "concept",
+    "technique",
+    "model",
+    "framework",
+    "benchmark",
+    "paper",
+    "pattern",
 ];
 
 pub fn build_compile_prompt(
@@ -27,7 +33,12 @@ fn build_english(
     _st: &SourceType,
 ) -> (String, String) {
     let all = entity_types.join(", ");
-    let concept_t = entity_types.iter().filter(|t| CONCEPT_LIKE.contains(t)).copied().collect::<Vec<_>>().join(", ");
+    let concept_t = entity_types
+        .iter()
+        .filter(|t| CONCEPT_LIKE.contains(t))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let sys = format!(
         "You are a knowledge extraction engine. Analyze documents and extract structured knowledge into wiki pages.
@@ -89,7 +100,8 @@ source: document-filename
         ct = concept_t,
     );
 
-    let usr = format!("Extract all knowledge units from the following document:\n\n---\n{content}\n---");
+    let usr =
+        format!("Extract all knowledge units from the following document:\n\n---\n{content}\n---");
     (sys, usr)
 }
 
@@ -100,7 +112,12 @@ fn build_chinese(
     _st: &SourceType,
 ) -> (String, String) {
     let all = entity_types.join(", ");
-    let concept_t = entity_types.iter().filter(|t| CONCEPT_LIKE.contains(t)).copied().collect::<Vec<_>>().join(", ");
+    let concept_t = entity_types
+        .iter()
+        .filter(|t| CONCEPT_LIKE.contains(t))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let sys = format!(
         "你是一个知识抽取引擎。分析文档并抽取结构化知识到 Wiki 页面。

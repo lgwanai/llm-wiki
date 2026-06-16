@@ -7,8 +7,12 @@ use crate::config::get_memory_dir;
 use crate::error::WikiResult;
 
 const DECAY_S_VALUES: &[(&str, f64)] = &[
-    ("architecture", 260.0), ("project", 130.0), ("bug", 20.0),
-    ("meeting", 10.0), ("pattern", 87.0), ("preference", 527.0),
+    ("architecture", 260.0),
+    ("project", 130.0),
+    ("bug", 20.0),
+    ("meeting", 10.0),
+    ("pattern", 87.0),
+    ("preference", 527.0),
 ];
 
 fn memory_path(filename: &str) -> std::path::PathBuf {
@@ -16,7 +20,9 @@ fn memory_path(filename: &str) -> std::path::PathBuf {
 }
 
 fn load_json_list(path: &std::path::Path) -> Vec<serde_json::Value> {
-    if !path.exists() { return vec![]; }
+    if !path.exists() {
+        return vec![];
+    }
     fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -24,7 +30,9 @@ fn load_json_list(path: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 fn save_json(path: &std::path::Path, data: &serde_json::Value) -> WikiResult<()> {
-    if let Some(p) = path.parent() { fs::create_dir_all(p)?; }
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p)?;
+    }
     fs::write(path, serde_json::to_string_pretty(data)?)?;
     Ok(())
 }
@@ -53,13 +61,25 @@ pub fn apply_retention_decay() -> WikiResult<serde_json::Value> {
         let entity_id = fact.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
         let mut fact_type = "project";
 
-        if entity_id.contains("bug") || entity_id.contains("fix") { fact_type = "bug"; }
-        else if entity_id.contains("meeting") { fact_type = "meeting"; }
-        else if entity_id.contains("pattern") { fact_type = "pattern"; }
-        else if entity_id.contains("decision") || entity_id.contains("arch") { fact_type = "architecture"; }
+        if entity_id.contains("bug") || entity_id.contains("fix") {
+            fact_type = "bug";
+        } else if entity_id.contains("meeting") {
+            fact_type = "meeting";
+        } else if entity_id.contains("pattern") {
+            fact_type = "pattern";
+        } else if entity_id.contains("decision") || entity_id.contains("arch") {
+            fact_type = "architecture";
+        }
 
-        let s = DECAY_S_VALUES.iter().find(|(k, _)| *k == fact_type).map(|(_, v)| *v).unwrap_or(130.0);
-        let last = fact.get("last_confirmed").and_then(|v| v.as_str()).unwrap_or("");
+        let s = DECAY_S_VALUES
+            .iter()
+            .find(|(k, _)| *k == fact_type)
+            .map(|(_, v)| *v)
+            .unwrap_or(130.0);
+        let last = fact
+            .get("last_confirmed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let days = days_since(last);
         let retention = (-days as f64 / s).exp();
 
@@ -92,13 +112,19 @@ pub fn apply_retention_decay() -> WikiResult<serde_json::Value> {
 pub fn promote_working_to_episodic() -> WikiResult<usize> {
     let working_path = memory_path("working.json");
     let working: Vec<serde_json::Value> = load_json_list(&working_path);
-    if working.len() < 5 { return Ok(0); }
+    if working.len() < 5 {
+        return Ok(0);
+    }
 
     // Group by date
-    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
     for obs in &working {
         let ts = obs.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
-        groups.entry(ts.chars().take(10).collect()).or_default().push(obs);
+        groups
+            .entry(ts.chars().take(10).collect())
+            .or_default()
+            .push(obs);
     }
 
     let episodes_path = memory_path("episodic.json");
@@ -109,9 +135,15 @@ pub fn promote_working_to_episodic() -> WikiResult<usize> {
     for (date_key, group) in groups {
         if group.len() >= 5 {
             let empty_vec = vec![];
-            let entity_ids: Vec<String> = group.iter()
-                .flat_map(|obs| obs.get("entity_ids").and_then(|v| v.as_array()).unwrap_or(&empty_vec).iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string())))
+            let entity_ids: Vec<String> = group
+                .iter()
+                .flat_map(|obs| {
+                    obs.get("entity_ids")
+                        .and_then(|v| v.as_array())
+                        .unwrap_or(&empty_vec)
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                })
                 .collect();
             episodes.push(serde_json::json!({
                 "id": format!("episode-{date_key}"),
@@ -123,7 +155,9 @@ pub fn promote_working_to_episodic() -> WikiResult<usize> {
             }));
             promoted += group.len();
         } else {
-            for obs in group { remaining.push(obs.clone()); }
+            for obs in group {
+                remaining.push(obs.clone());
+            }
         }
     }
 

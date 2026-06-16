@@ -2,9 +2,9 @@
 //! Parses ===PAGE_END=== delimited multi-page responses with YAML frontmatter.
 //! Handles LLM preambles and multiple frontmatter blocks per section.
 
-use std::collections::HashMap;
 use crate::error::{WikiError, WikiResult};
 use crate::types::PageType;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct ParsedPage {
@@ -21,7 +21,9 @@ pub fn parse_compile_response(response: &str, _lang: &str) -> WikiResult<Vec<Par
 
     for section in sections {
         let trimmed = section.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         // Parse all frontmatter blocks in this section
         let extracted = parse_section(trimmed);
         pages.extend(extracted);
@@ -46,7 +48,9 @@ fn parse_section(section: &str) -> Vec<ParsedPage> {
     let mut safety = 0;
     loop {
         safety += 1;
-        if safety > 100 { break; } // prevent infinite loops
+        if safety > 100 {
+            break;
+        } // prevent infinite loops
 
         // Find next `---` at start of a line
         let fm_start = match find_frontmatter_start(remaining) {
@@ -75,14 +79,27 @@ fn parse_section(section: &str) -> Vec<ParsedPage> {
 
         // Parse frontmatter
         let fm = parse_frontmatter(fm_str);
-        if fm.is_empty() { continue; }
+        if fm.is_empty() {
+            continue;
+        }
 
-        let page_type = fm.get("type").and_then(|v| v.as_str())
-            .map(|t| if t.to_lowercase() == "entity" { PageType::Entity } else { PageType::Concept })
+        let page_type = fm
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| {
+                if t.to_lowercase() == "entity" {
+                    PageType::Entity
+                } else {
+                    PageType::Concept
+                }
+            })
             .unwrap_or(PageType::Concept);
 
         // Extract ID: prefer `id` > slugified `name` > first heading > content hash
-        let id = fm.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        let id = fm
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
             .or_else(|| fm.get("name").and_then(|v| v.as_str()).map(|n| slugify(n)))
             .or_else(|| extract_first_heading(&body).map(|h| slugify(&h)))
             .unwrap_or_else(|| {
@@ -93,7 +110,12 @@ fn parse_section(section: &str) -> Vec<ParsedPage> {
                 format!("doc-{:x}", h.finish())
             });
 
-        pages.push(ParsedPage { id, page_type, frontmatter: fm, body });
+        pages.push(ParsedPage {
+            id,
+            page_type,
+            frontmatter: fm,
+            body,
+        });
     }
 
     pages
@@ -103,7 +125,9 @@ fn parse_section(section: &str) -> Vec<ParsedPage> {
 fn find_frontmatter_start(text: &str) -> Option<usize> {
     let mut pos = 0usize;
     for line in text.split_inclusive('\n') {
-        if line.trim() == "---" { return Some(pos); }
+        if line.trim() == "---" {
+            return Some(pos);
+        }
         pos += line.len();
     }
     None
@@ -137,13 +161,17 @@ fn extract_first_heading(body: &str) -> Option<String> {
 fn parse_frontmatter(fm_str: &str) -> HashMap<String, serde_json::Value> {
     serde_yaml::from_str::<serde_yaml::Value>(fm_str)
         .ok()
-        .and_then(|v| v.as_mapping().map(|m| {
-            m.iter().map(|(k, v)| {
-                let key = k.as_str().unwrap_or("").to_string();
-                let val = yaml_to_json(v.clone());
-                (key, val)
-            }).collect()
-        }))
+        .and_then(|v| {
+            v.as_mapping().map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        let key = k.as_str().unwrap_or("").to_string();
+                        let val = yaml_to_json(v.clone());
+                        (key, val)
+                    })
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -152,9 +180,13 @@ pub fn yaml_to_json(v: serde_yaml::Value) -> serde_json::Value {
     match v {
         serde_yaml::Value::String(s) => serde_json::Value::String(s),
         serde_yaml::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { serde_json::Value::Number(i.into()) }
-            else if let Some(f) = n.as_f64() { serde_json::json!(f) }
-            else { serde_json::Value::String(n.to_string()) }
+            if let Some(i) = n.as_i64() {
+                serde_json::Value::Number(i.into())
+            } else if let Some(f) = n.as_f64() {
+                serde_json::json!(f)
+            } else {
+                serde_json::Value::String(n.to_string())
+            }
         }
         serde_yaml::Value::Bool(b) => serde_json::Value::Bool(b),
         serde_yaml::Value::Sequence(seq) => {
@@ -174,7 +206,8 @@ pub fn yaml_to_json(v: serde_yaml::Value) -> serde_json::Value {
 
 /// Slugify preserving CJK characters.
 fn slugify(name: &str) -> String {
-    let slug: String = name.chars()
+    let slug: String = name
+        .chars()
         .filter_map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
                 Some(c.to_ascii_lowercase())
@@ -191,9 +224,13 @@ fn slugify(name: &str) -> String {
     let mut last_hyphen = false;
     for c in slug.chars() {
         if c == '-' {
-            if !last_hyphen && !result.is_empty() { result.push('-'); last_hyphen = true; }
+            if !last_hyphen && !result.is_empty() {
+                result.push('-');
+                last_hyphen = true;
+            }
         } else {
-            result.push(c); last_hyphen = false;
+            result.push(c);
+            last_hyphen = false;
         }
     }
     result.trim_matches('-').to_string()
@@ -229,7 +266,8 @@ mod tests {
 
     #[test]
     fn test_fallback_to_heading() {
-        let response = "---\ntype: concept\n---\n\n# My Cool Topic\n\nSome content.\n===PAGE_END===";
+        let response =
+            "---\ntype: concept\n---\n\n# My Cool Topic\n\nSome content.\n===PAGE_END===";
         let pages = parse_compile_response(response, "en").unwrap();
         assert_eq!(pages[0].id, "my-cool-topic");
     }
