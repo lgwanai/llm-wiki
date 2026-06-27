@@ -233,6 +233,23 @@ pub fn build_metadata_index() -> Vec<MetadataEntry> {
                 .to_string(),
             questions: list_from_yaml(&fm, "questions"),
             facts: list_from_yaml(&fm, "facts"),
+            source: fm
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            source_name: fm
+                .get("source_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            source_type: fm
+                .get("source_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            source_files: list_from_yaml(&fm, "source_files"),
+            source_refs: source_refs_from_yaml(&fm),
             path: path.to_string_lossy().to_string(),
         };
         items.push(entry);
@@ -250,6 +267,11 @@ pub struct MetadataEntry {
     pub summary: String,
     pub questions: Vec<String>,
     pub facts: Vec<String>,
+    pub source: String,
+    pub source_name: String,
+    pub source_type: String,
+    pub source_files: Vec<String>,
+    pub source_refs: Vec<String>,
     pub path: String,
 }
 
@@ -264,6 +286,29 @@ fn list_from_yaml(fm: &HashMap<String, serde_yaml::Value>, key: &str) -> Vec<Str
             _ => vec![],
         })
         .unwrap_or_default()
+}
+
+fn source_refs_from_yaml(fm: &HashMap<String, serde_yaml::Value>) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(serde_yaml::Value::Sequence(items)) = fm.get("source_refs") {
+        for item in items {
+            match item {
+                serde_yaml::Value::Mapping(map) => {
+                    for key in ["path", "name", "type"] {
+                        if let Some(value) = map
+                            .get(&serde_yaml::Value::String(key.to_string()))
+                            .and_then(|v| v.as_str())
+                        {
+                            refs.push(value.to_string());
+                        }
+                    }
+                }
+                serde_yaml::Value::String(s) => refs.push(s.clone()),
+                _ => {}
+            }
+        }
+    }
+    refs
 }
 
 /// Search the metadata index and return scored results.
@@ -306,6 +351,28 @@ pub fn metadata_search(query: &str, index: &[MetadataEntry], limit: usize) -> Ve
             let ql = question.to_lowercase();
             if ql.contains(&q) || q.contains(&ql) {
                 score += 2.5;
+            }
+        }
+        // Source/provenance match. This lets scoped questions hit pages by
+        // customer, paper, report, version folder, or source filename.
+        for source in entry
+            .source_files
+            .iter()
+            .chain(entry.source_refs.iter())
+            .chain([&entry.source, &entry.source_name, &entry.source_type])
+        {
+            let source_l = source.to_lowercase();
+            if source_l.is_empty() {
+                continue;
+            }
+            if source_l.contains(&q) || q.contains(&source_l) {
+                score += 3.0;
+            } else {
+                for term in &q_terms {
+                    if source_l.contains(term) {
+                        score += 1.0;
+                    }
+                }
             }
         }
 
@@ -560,4 +627,137 @@ fn path_to_id(path: &str) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SourceType;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn metadata_entry(id: &str, source: &str) -> MetadataEntry {
+        MetadataEntry {
+            id: id.to_string(),
+            name: "AI Cognition".to_string(),
+            entity_type: "concept".to_string(),
+            aliases: vec![],
+            keywords: vec![],
+            summary: String::new(),
+            questions: vec![],
+            facts: vec![],
+            source: source.to_string(),
+            source_name: source.to_string(),
+            source_type: "doc".to_string(),
+            source_files: vec![source.to_string()],
+            source_refs: vec![source.to_string()],
+            path: format!("/tmp/{id}.md"),
+        }
+    }
+
+    #[test]
+    fn test_metadata_search_matches_source_provenance() {
+        let index = vec![
+            metadata_entry("ai-cognition", "clients/acme/2026-ai-course.md"),
+            metadata_entry("ai-literature", "papers/transformer-survey.md"),
+        ];
+
+        let results = metadata_search("acme AI认知", &index, 5);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "ai-cognition");
+    }
+
+    #[test]
+    fn test_agent_compile_ingest_is_searchable_across_streams() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        let source = tmp.path().join("acme-agent-source.md");
+        std::fs::create_dir_all(&wiki_dir).unwrap();
+        std::fs::write(
+            &source,
+            "# ACME Agent Source\n\nOrion Skill Compiler connects Aurora Retrieval.\n",
+        )
+        .unwrap();
+
+        std::env::set_var("LLM_WIKI_DIR", &wiki_dir);
+        crate::config::reset_config();
+
+        let response = r#"---
+id: orion-skill-compiler
+type: concept
+name: Orion Skill Compiler
+confidence: 0.9
+aliases: [Orion Compiler]
+keywords: [orion, skill-agent, retrieval-provenance, acme]
+questions: [How does skill Agent compile preserve retrieval?]
+facts: [Orion Skill Compiler connects Aurora Retrieval]
+---
+
+# Orion Skill Compiler
+
+## Overview
+Orion Skill Compiler is generated through the skill Agent compile path.
+
+## Shared Understanding
+It writes Markdown page bodies that BM25 can index and frontmatter that metadata search can index.
+
+## Source Perspective
+The ACME source says Orion Skill Compiler connects [[aurora-retrieval]].
+
+## Relationships
+- *relates_to* [[aurora-retrieval]] — retrieval target produced from the same source
+
+===PAGE_END===
+---
+id: aurora-retrieval
+type: concept
+name: Aurora Retrieval
+confidence: 0.88
+aliases: [Aurora Search]
+keywords: [aurora, graph-retrieval, skill-agent]
+questions: [What retrieves skill Agent compiled pages?]
+facts: [Aurora Retrieval is linked from Orion Skill Compiler]
+---
+
+# Aurora Retrieval
+
+## Overview
+Aurora Retrieval represents graph retrieval for skill Agent compiled pages.
+
+## Relationships
+- *relates_to* [[orion-skill-compiler]] — source-paired compile entity
+
+===PAGE_END==="#
+            .to_string();
+
+        crate::compile::apply_compile_response(&source, &SourceType::Doc, &response, "en").unwrap();
+
+        let bm25 = bm25_search("Orion Skill Compiler", &build_bm25_index(), 5);
+        assert!(bm25.iter().any(|r| r.id == "orion-skill-compiler"));
+
+        let metadata = metadata_search("retrieval-provenance", &build_metadata_index(), 5);
+        assert!(metadata.iter().any(|r| r.id == "orion-skill-compiler"));
+
+        let graph = graph_search("Aurora Retrieval", 5);
+        assert!(graph.iter().any(|r| r.id == "aurora-retrieval"));
+
+        let mut streams = HashSet::new();
+        streams.insert("bm25".to_string());
+        streams.insert("metadata".to_string());
+        streams.insert("graph".to_string());
+        let fused = search("Orion Skill Compiler", &streams, 5);
+        let orion = fused
+            .iter()
+            .find(|r| r.id == "orion-skill-compiler")
+            .expect("fused search should include skill Agent compiled page");
+        assert!(orion.stream_ranks.contains_key("bm25"));
+        assert!(orion.stream_ranks.contains_key("metadata"));
+        assert!(orion.stream_ranks.contains_key("graph"));
+
+        std::env::remove_var("LLM_WIKI_DIR");
+        crate::config::reset_config();
+    }
 }

@@ -70,10 +70,16 @@ source: document-filename
 ---
 
 ## Overview
-[2-4 sentence summary of what this is and why it matters]
+[2-4 sentence stable summary of the concept/entity and why it matters]
 
-## Key Details
-[Bullet points of the most important information]
+## Shared Understanding
+[Facts, definitions, mechanisms, or claims that are broadly reusable and likely to remain true across sources]
+
+## Source Perspective
+[What this source specifically says, emphasizes, customizes, disputes, or adds. Preserve audience, scenario, document, author, organization, version, time, or method details if present.]
+
+## Variations and Conditions
+[Important differences, constraints, exceptions, versions, interpretations, use cases, or open disagreements. If the source only gives one view, state that this is the source-specific view.]
 
 ## Relationships
 - *uses* [[other-entity]] — why/how it uses it
@@ -91,10 +97,12 @@ source: document-filename
 ## Rules
 1. Extract ALL significant knowledge units — be thorough.
 2. Use canonical-slug IDs (lowercase, hyphens).
-3. Confidence: 0.9 = explicit, 0.7 = clear, 0.5 = inferred.
-4. Link entities via [[wikilinks]] in relationships.
-5. Write in the same language as the source document.
-6. Never skip the ===PAGE_END=== delimiter.",
+3. Reuse the same canonical ID for the same concept across related documents so later compiles can merge shared knowledge and source-specific differences.
+4. Do not flatten source-specific claims into universal truth. Put stable common knowledge under Shared Understanding and contextual/customized claims under Source Perspective or Variations and Conditions.
+5. Confidence: 0.9 = explicit, 0.7 = clear, 0.5 = inferred.
+6. Link entities via [[wikilinks]] in relationships.
+7. Write in the same language as the source document.
+8. Never skip the ===PAGE_END=== delimiter.",
         focus = focus_description,
         all = all,
         ct = concept_t,
@@ -149,10 +157,16 @@ source: 文档文件名
 ---
 
 ## 概述
-[2-4 句话总结这是什么以及为什么重要]
+[用 2-4 句话稳定总结这个概念/实体是什么以及为什么重要]
 
-## 关键细节
-[最重要的信息要点]
+## 共性认知
+[可跨来源复用、较稳定的事实、定义、机制、原则或结论]
+
+## 来源视角
+[此来源特别强调、定制、补充、反驳或限定的内容。如果来源包含受众、场景、文档、作者、机构、版本、时间、方法等信息，要保留下来。]
+
+## 差异与适用条件
+[重要差异、约束、例外、版本、解释、使用场景或尚未统一的争议。如果只有一个来源视角，说明这是该来源的特定说法。]
 
 ## 关系
 - *uses* [[other-entity]] — 为什么使用/如何使用
@@ -170,10 +184,12 @@ source: 文档文件名
 ## 规则
 1. 抽取所有重要的知识单元 — 要全面。
 2. 使用 canonical-slug 格式的 ID（小写，连字符分隔）。
-3. 置信度：0.9 = 明确且来源充分，0.7 = 清楚但不太确定，0.5 = 推断。
-4. 在关系中通过 [[wikilinks]] 链接实体。
-5. 使用与源文档相同的语言编写。
-6. 永远不要省略 ===PAGE_END=== 分隔符。",
+3. 同一概念在相关文档中要尽量复用同一个 canonical ID，便于后续编译把共性知识和来源差异合并到同一页。
+4. 不要把来源特定的说法写成普遍真理。稳定共性放在“共性认知”，上下文定制、特定观点、版本差异放在“来源视角”或“差异与适用条件”。
+5. 置信度：0.9 = 明确且来源充分，0.7 = 清楚但不太确定，0.5 = 推断。
+6. 在关系中通过 [[wikilinks]] 链接实体。
+7. 使用与源文档相同的语言编写。
+8. 永远不要省略 ===PAGE_END=== 分隔符。",
         focus = focus_description,
         all = all,
         ct = concept_t,

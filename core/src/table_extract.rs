@@ -6,6 +6,8 @@
 
 use crate::error::WikiResult;
 use crate::ledger;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 /// A parsed markdown table ready for storage.
 #[derive(Debug, Clone)]
@@ -54,12 +56,14 @@ pub fn extract_tables(content: &str) -> Vec<MarkdownTable> {
             continue;
         }
 
-        // Check if the second line is a separator row
+        // Check if the second line is a separator row.
         let sep = lines[table_start + 1].trim();
-        let is_sep = sep.contains('|')
-            && sep
-                .chars()
-                .all(|c| c == '|' || c == ':' || c == '-' || c == ' ' || c == '\t');
+        let sep_cells = parse_pipe_row(sep);
+        let is_sep = !sep_cells.is_empty()
+            && sep_cells.iter().all(|cell| {
+                let c = cell.trim();
+                c.len() >= 3 && c.chars().all(|ch| ch == ':' || ch == '-')
+            });
 
         if !is_sep {
             i = table_end;
@@ -67,10 +71,9 @@ pub fn extract_tables(content: &str) -> Vec<MarkdownTable> {
         }
 
         // Parse headers from first row
-        let headers: Vec<String> = lines[table_start]
-            .split('|')
+        let headers: Vec<String> = parse_pipe_row(lines[table_start])
+            .into_iter()
             .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
             .collect();
 
         if headers.is_empty() {
@@ -81,10 +84,9 @@ pub fn extract_tables(content: &str) -> Vec<MarkdownTable> {
         // Parse data rows (skip separator at table_start + 1)
         let mut rows = Vec::new();
         for row_idx in (table_start + 2)..table_end {
-            let cells: Vec<String> = lines[row_idx]
-                .split('|')
+            let cells: Vec<String> = parse_pipe_row(lines[row_idx])
+                .into_iter()
                 .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty())
                 .collect();
             // Pad or truncate to match header count
             let mut padded = cells;
@@ -105,6 +107,55 @@ pub fn extract_tables(content: &str) -> Vec<MarkdownTable> {
     tables
 }
 
+fn parse_pipe_row(line: &str) -> Vec<&str> {
+    let trimmed = line.trim();
+    let trimmed = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let trimmed = trimmed.strip_suffix('|').unwrap_or(trimmed);
+    trimmed.split('|').collect()
+}
+
+/// Store all useful Markdown tables from a source document and replace them with table links.
+///
+/// The project treats embedded Markdown tables as structured data by default, because users rarely
+/// create ledger tables explicitly. Any table with at least one data row is persisted.
+pub fn extract_large_tables_to_links(
+    content: &str,
+    source: &Path,
+    errors: &mut Vec<String>,
+) -> String {
+    let tables = extract_tables(content);
+    if tables.is_empty() {
+        return content.to_string();
+    }
+
+    let mut output = content.to_string();
+    for (idx, table) in tables.iter().enumerate() {
+        if table.rows.is_empty() {
+            continue;
+        }
+        let table_name = source_table_name(source, idx + 1);
+        match store_table(&table_name, &table.headers, &table.rows) {
+            Ok(name) => {
+                let link = table_link(&name, &table.headers);
+                output = output.replacen(&table.raw, &link, 1);
+            }
+            Err(e) => errors.push(format!("Markdown table storage '{}': {e}", table_name)),
+        }
+    }
+    output
+}
+
+fn source_table_name(source: &Path, index: usize) -> String {
+    let stem = source
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.to_string_lossy().hash(&mut hasher);
+    format!("{stem} md-table-{:x}-{index}", hasher.finish())
+}
+
 /// Store a markdown table in DuckDB via the ledger module.
 ///
 /// Returns the sanitized DuckDB table name.
@@ -121,11 +172,12 @@ pub fn store_table(name: &str, headers: &[String], rows: &[Vec<String>]) -> Wiki
     // Slugify the table name to prevent SQL identifier issues from
     // LLM-generated page IDs containing special characters.
     let slug = ledger::slugify(name);
+    let _ = ledger::delete_table(&slug);
     let safe_name = ledger::create_table(
-        &slug,
+        name,
         &fields_json,
-        None,       // unique
-        false,      // auto_increment
+        None,        // unique
+        false,       // auto_increment
         Some(&slug), // table_name
         "Extracted from markdown document during compilation",
     )?;
@@ -178,6 +230,12 @@ pub fn table_link(name: &str, headers: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_extract_simple_table() {
@@ -273,5 +331,40 @@ Middle text.
         assert!(link.contains("..."));
         assert!(!link.contains("D"));
         assert!(!link.contains("E"));
+    }
+
+    #[test]
+    fn test_extract_markdown_tables_to_links_stores_table() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki_dir = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki_dir).unwrap();
+        std::env::set_var("LLM_WIKI_DIR", &wiki_dir);
+        crate::config::reset_config();
+
+        let source = tmp.path().join("客户评分.md");
+        let content = "\
+# Report
+
+| 客户 | 分数 |
+|------|------|
+| A | 90 |
+| B | 80 |
+
+Done.";
+        let mut errors = Vec::new();
+        let replaced = extract_large_tables_to_links(content, &source, &mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(replaced.contains("[[table:"));
+        assert!(!replaced.contains("| A | 90 |"));
+
+        let tables = ledger::list_tables().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0]["record_count"], serde_json::json!(2));
+        assert!(tables[0]["table"]
+            .as_str()
+            .unwrap()
+            .starts_with("md-table-"));
     }
 }

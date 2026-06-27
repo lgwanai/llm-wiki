@@ -30,6 +30,9 @@ export default function App() {
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [selectedPage, setSelectedPage] = useState<string | null>(null);
   const [pageContent, setPageContent] = useState("");
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [tableContent, setTableContent] = useState("");
+  const [tableError, setTableError] = useState<string | null>(null);
   const [section, setSection] = useState<"files" | "graph" | "tables">("files");
   const [showConfig, setShowConfig] = useState(false);
   const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
@@ -68,13 +71,13 @@ export default function App() {
   }, []);
 
   const listTables = useCallback(async () => {
-    try { setTables(await invoke("list_ledger_tables") as TableInfo[]); } catch {}
+    try { setTables(await invoke("list_ledger_tables") as TableInfo[]); } catch { setTables([]); }
   }, []);
 
   const importFiles = useCallback(async () => {
     try {
       const dialog = await import("@tauri-apps/plugin-dialog");
-      const files = await dialog.open({ multiple: true, title: "Import Files", filters: [{ name: "Documents", extensions: ["md","markdown","mdown","txt","pdf","png","jpg","jpeg","py","rs","js","ts","json","yaml"] }] });
+      const files = await dialog.open({ multiple: true, title: "Import Files", filters: [{ name: "Documents", extensions: ["md","markdown","mdown","txt","pdf","png","jpg","jpeg","py","rs","js","ts","json","csv","tsv","xlsx","xls","yaml"] }] });
       if (files) {
         const fileList = Array.isArray(files) ? files : [files];
         for (const src of fileList) {
@@ -95,7 +98,8 @@ export default function App() {
       setSourceFiles(prev => prev.map(f => f.path === filePath ? { ...f, status: hasErr ? "error" as const : "done" as const, pages: result.pages_created || 0, error: errors[0] || (result.pages_created === 0 ? "No pages extracted" : undefined) } : f));
     } catch (e: any) { setSourceFiles(prev => prev.map(f => f.path === filePath ? { ...f, status: "error" as const, error: String(e) } : f)); }
     refreshAll();
-  }, [refreshAll]);
+    await listTables();
+  }, [refreshAll, listTables]);
 
   const compileAll = useCallback(async () => {
     for (const f of sourceFiles) {
@@ -104,20 +108,20 @@ export default function App() {
   }, [sourceFiles, compileFile]);
 
   const selectPage = useCallback(async (pageId: string) => {
-    setSection("files"); setSelectedSource(null); setSelectedPage(pageId); setEditMode(false);
+    setSection("files"); setSelectedSource(null); setSelectedTable(null); setTableError(null); setSelectedPage(pageId); setEditMode(false);
     try { setPageContent(await invoke("get_page_content", { pageId }) as string); }
     catch { setPageContent(`# ${pageId}\n\nNot found.`); }
   }, []);
 
   const selectTable = useCallback(async (tableName: string) => {
-    setSection("tables"); setSelectedSource(null); setSelectedPage(tableName);
-    try { setPageContent(await invoke("get_table_content", { table: tableName }) as string); }
-    catch { setPageContent(`Table: ${tableName}\n\nNo data.`); }
+    setSection("tables"); setSelectedSource(null); setSelectedPage(null); setSelectedTable(tableName); setTableError(null); setTableContent("");
+    try { setTableContent(await invoke("get_table_content", { table: tableName }) as string); }
+    catch (e) { setTableError(String(e)); setTableContent("[]"); }
     setEditMode(false);
   }, []);
 
   const openSourceMarkdown = useCallback(async (file: SourceFile) => {
-    setSection("files"); setSelectedPage(null); setEditMode(false); setSelectedSource({ path: file.path, name: file.name });
+    setSection("files"); setSelectedPage(null); setSelectedTable(null); setTableError(null); setEditMode(false); setSelectedSource({ path: file.path, name: file.name });
     try { setSourceEditContent(await invoke("get_source_file_content", { path: file.path }) as string); }
     catch (e) { setSourceEditContent(`# ${file.name}\n\n${String(e)}`); }
   }, []);
@@ -131,12 +135,20 @@ export default function App() {
   }, [selectedSource, sourceEditContent, wsPath, listFiles]);
 
   const saveEdit = useCallback(async () => {
+    if (section === "tables" && selectedTable) {
+      setTableContent(editContent);
+      setEditMode(false);
+      return;
+    }
     if (!selectedPage) return;
     try { await invoke("save_page_content", { pageId: selectedPage, content: editContent }); setPageContent(editContent); setEditMode(false); refreshAll(); }
     catch (e) { console.error(e); }
-  }, [selectedPage, editContent, refreshAll]);
+  }, [section, selectedTable, selectedPage, editContent, refreshAll]);
 
-  const startEdit = useCallback(() => { setEditContent(pageContent); setEditMode(true); }, [pageContent]);
+  const startEdit = useCallback(() => {
+    setEditContent(section === "tables" ? tableContent : pageContent);
+    setEditMode(true);
+  }, [section, tableContent, pageContent]);
 
   const sendChat = useCallback(async (question: string) => {
     setChatMessages(prev => {
@@ -227,7 +239,7 @@ export default function App() {
           ) : isGraph ? (
             <GraphCanvas nodes={graphNodes} edges={graphEdges} onSelectNode={selectPage} />
           ) : isTables ? (
-            <LedgerView tableName={selectedPage} content={pageContent} tables={tables} onSelectTable={selectTable}
+            <LedgerView tableName={selectedTable} content={tableContent} error={tableError} tables={tables} onSelectTable={selectTable}
               editMode={editMode} editContent={editContent} setEditContent={setEditContent} onStartEdit={startEdit} onSaveEdit={saveEdit} onCancelEdit={() => setEditMode(false)} />
           ) : selectedSource ? (
             <SourceMarkdownEditor source={selectedSource} content={sourceEditContent} onChange={setSourceEditContent} onSave={saveSourceMarkdown} onCompile={() => setCompileConfirm({ path: selectedSource.path, name: selectedSource.name })} />
@@ -582,12 +594,13 @@ function preprocessWikiLinks(text: string) {
 }
 
 // ═══════════════════════════════════════════════ LEDGER VIEW
-function LedgerView({ tableName, content, tables, onSelectTable, editMode, editContent, setEditContent, onStartEdit, onSaveEdit, onCancelEdit }: any) {
+function LedgerView({ tableName, content, error, tables, onSelectTable, editMode, editContent, setEditContent, onStartEdit, onSaveEdit, onCancelEdit }: any) {
   if (!tableName) {
     return (
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-muted-fg)", flexDirection: "column", gap: 8 }}>
         <Database size={48} style={{ opacity: 0.3 }} />
-        <p style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>Select a ledger table</p>
+        <p style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>Select a table from the left list</p>
+        {tables?.length > 0 && <p style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-muted-fg)" }}>{tables.length} tables available</p>}
       </div>
     );
   }
@@ -596,8 +609,9 @@ function LedgerView({ tableName, content, tables, onSelectTable, editMode, editC
   let rows: any[] = [];
   let cols: string[] = [];
   let parseError = false;
+  const rawContent = typeof content === "string" && content.trim() ? content : "[]";
   try {
-    let data = JSON.parse(content);
+    let data = JSON.parse(rawContent);
     if (!Array.isArray(data)) data = [data];
     rows = data.filter((r: any) => r && typeof r === "object");
     if (rows.length > 0) {
@@ -618,11 +632,16 @@ function LedgerView({ tableName, content, tables, onSelectTable, editMode, editC
           <h2 style={{ fontSize: 18, margin: "4px 0 0" }}>{tableName}</h2>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" onClick={onStartEdit} style={{ fontSize: 12 }}>Edit JSON</button>
+          <button className="btn" onClick={onStartEdit} style={{ fontSize: 12 }} disabled={Boolean(error)}>Edit JSON</button>
         </div>
       </div>
 
-      {editMode ? (
+      {error ? (
+        <div style={{ padding: 16, background: "hsla(0 84% 60% / 0.1)", border: "1px solid hsla(0 84% 60% / 0.3)", borderRadius: 6 }}>
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "hsl(0 84% 60%)" }}>Failed to load table</p>
+          <pre style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-muted-fg)", marginTop: 8, whiteSpace: "pre-wrap" }}>{error}</pre>
+        </div>
+      ) : editMode ? (
         <div>
           <textarea value={editContent} onChange={e => setEditContent(e.target.value)}
             style={{ width: "100%", minHeight: "50vh", padding: 12, fontFamily: "var(--font-mono)", fontSize: 13, background: "var(--color-bg)", color: "var(--color-fg)", border: "1px solid var(--color-accent)", borderRadius: 6, resize: "vertical", outline: "none" }} />
@@ -654,7 +673,7 @@ function LedgerView({ tableName, content, tables, onSelectTable, editMode, editC
       ) : parseError ? (
         <div style={{ padding: 16, background: "hsla(0 84% 60% / 0.1)", border: "1px solid hsla(0 84% 60% / 0.3)", borderRadius: 6 }}>
           <p style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "hsl(0 84% 60%)" }}>Failed to parse table data</p>
-          <pre style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-muted-fg)", marginTop: 8, maxHeight: 200, overflow: "auto" }}>{content.slice(0, 500)}</pre>
+          <pre style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-muted-fg)", marginTop: 8, maxHeight: 200, overflow: "auto" }}>{rawContent.slice(0, 500)}</pre>
         </div>
       ) : (
         <div style={{ color: "var(--color-muted-fg)", fontFamily: "var(--font-mono)", fontSize: 13, textAlign: "center", padding: 40 }}>
@@ -672,11 +691,12 @@ function formatCell(val: any): string {
   return String(val);
 }
 
-// ═══════════════════════════════════════════════ GRAPH (unchanged from previous)
 function GraphCanvas({ nodes, edges, onSelectNode }: { nodes: any[]; edges: any[]; onSelectNode: (id: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hoveredNode, setHoveredNode] = useState<any>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [labelMode, setLabelMode] = useState<"key" | "all" | "none">("key");
+  const hoveredNodeRef = useRef<any>(null);
   const transformRef = useRef({ x: 0, y: 0, scale: 1 });
   const targetRef = useRef({ x: 0, y: 0, scale: 1 });
 
@@ -685,56 +705,241 @@ function GraphCanvas({ nodes, edges, onSelectNode }: { nodes: any[]; edges: any[
     if (!canvas || nodes.length === 0) return;
     const ctx = canvas.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
-    function resize() { const r = canvas!.getBoundingClientRect(); canvas!.width = r.width * dpr; canvas!.height = r.height * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+    let W = 0, H = 0;
+    function resize() {
+      const r = canvas!.getBoundingClientRect();
+      const nextW = Math.max(1, Math.floor(r.width));
+      const nextH = Math.max(1, Math.floor(r.height));
+      if (canvas!.width !== nextW * dpr || canvas!.height !== nextH * dpr) {
+        canvas!.width = nextW * dpr;
+        canvas!.height = nextH * dpr;
+      }
+      W = nextW;
+      H = nextH;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
     resize(); window.addEventListener("resize", resize);
-    const W = canvas.clientWidth, H = canvas.clientHeight;
-    const simNodes: any[] = nodes.map((n: any) => ({ id: n.id, name: n.name, type: n.type, confidence: n.confidence || 0.5, x: W/2+(Math.random()-.5)*W*.6, y: H/2+(Math.random()-.5)*H*.6, vx:0, vy:0, color: n.type==="concept"?"#2dd4a0":"#2dd4c0" }));
+    const nodeIds = new Set(nodes.map((n: any) => n.id));
+    const validEdges = edges.filter((e: any) => nodeIds.has(e.source) && nodeIds.has(e.target));
+    const degree = new Map<string, number>();
+    for (const n of nodes) degree.set(n.id, 0);
+    for (const e of validEdges) {
+      degree.set(e.source, (degree.get(e.source) || 0) + 1);
+      degree.set(e.target, (degree.get(e.target) || 0) + 1);
+    }
+    const sortedByDegree = [...nodes].sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
+    const keyNodeIds = new Set(sortedByDegree.slice(0, Math.max(8, Math.min(28, Math.ceil(nodes.length * 0.18)))).map((n: any) => n.id));
+    const edgeBudget = Math.max(80, Math.min(420, nodes.length * 4));
+    const linksForLayout = [...validEdges]
+      .sort((a: any, b: any) => {
+        const ap = a.type === "same_source" ? 1 : 0;
+        const bp = b.type === "same_source" ? 1 : 0;
+        return ap - bp;
+      })
+      .slice(0, edgeBudget);
+    const spacing = Math.max(86, Math.min(150, 620 / Math.max(1, Math.sqrt(nodes.length))));
+    const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+    const rows = Math.max(1, Math.ceil(nodes.length / cols));
+    const startX = W / 2 - ((cols - 1) * spacing) / 2;
+    const startY = H / 2 - ((rows - 1) * spacing) / 2;
+    const simNodes: any[] = sortedByDegree.map((n: any, i: number) => ({
+      id: n.id,
+      name: n.name || n.id,
+      type: n.type,
+      confidence: n.confidence || 0.5,
+      degree: degree.get(n.id) || 0,
+      isKey: keyNodeIds.has(n.id),
+      x: startX + (i % cols) * spacing + (Math.random() - 0.5) * 18,
+      y: startY + Math.floor(i / cols) * spacing + (Math.random() - 0.5) * 18,
+      vx: 0,
+      vy: 0,
+      color: n.type === "concept" ? "#2dd4a0" : "#22c8dc"
+    }));
+    const graphW = (cols - 1) * spacing + 220;
+    const graphH = (rows - 1) * spacing + 220;
+    const fitScale = Math.max(0.35, Math.min(1, W / graphW, H / graphH));
+    transformRef.current = { x: 0, y: 0, scale: fitScale };
+    targetRef.current = { x: 0, y: 0, scale: fitScale };
     const nodeMap = new Map(simNodes.map(n => [n.id, n]));
-    const links = edges.filter((e: any) => nodeMap.has(e.source) && nodeMap.has(e.target));
+    const links = linksForLayout.filter((e: any) => nodeMap.has(e.source) && nodeMap.has(e.target));
     let settled = false; let iter = 0;
+    let lastZoom = 1;
     function step() {
       if (settled) return; iter++; let tv = 0;
-      const rp = 3000, sk = 0.02, sl = 120, dp = 0.85;
-      for (const n of simNodes) { n.vx += (W/2-n.x)*.002; n.vy += (H/2-n.y)*.002; }
-      for (let i=0;i<simNodes.length;i++) for (let j=i+1;j<simNodes.length;j++) { const dx=simNodes[j].x-simNodes[i].x, dy=simNodes[j].y-simNodes[i].y, d=Math.hypot(dx,dy)+1, f=rp/(d*d); simNodes[i].vx-=f*dx/d; simNodes[i].vy-=f*dy/d; simNodes[j].vx+=f*dx/d; simNodes[j].vy+=f*dy/d; }
-      for (const l of links) { const s=nodeMap.get(l.source), t=nodeMap.get(l.target); if(!s||!t)continue; const dx=t.x-s.x,dy=t.y-s.y,d=Math.hypot(dx,dy)+1,f=(d-sl)*sk; s.vx+=f*dx/d;s.vy+=f*dy/d;t.vx-=f*dx/d;t.vy-=f*dy/d; }
-      for (const n of simNodes) { n.vx*=dp; n.vy*=dp; n.x+=n.vx; n.y+=n.vy; tv+=Math.abs(n.vx)+Math.abs(n.vy); }
-      if (iter>300||tv<.5) settled=true;
+      const repulsion = Math.max(26000, Math.min(90000, nodes.length * 980));
+      const spring = links.length > nodes.length * 2 ? 0.0028 : 0.006;
+      const springLength = Math.max(170, Math.min(260, 120 + nodes.length * 1.3));
+      const damping = 0.82;
+      const collision = labelMode === "all" ? 76 : 50;
+      for (const n of simNodes) {
+        n.vx += (W / 2 - n.x) * 0.00045;
+        n.vy += (H / 2 - n.y) * 0.00045;
+      }
+      if (simNodes.length <= 350) {
+        for (let i=0;i<simNodes.length;i++) for (let j=i+1;j<simNodes.length;j++) {
+          const dx=simNodes[j].x-simNodes[i].x, dy=simNodes[j].y-simNodes[i].y, d=Math.hypot(dx,dy)+1;
+          const f=repulsion/(d*d);
+          simNodes[i].vx-=f*dx/d; simNodes[i].vy-=f*dy/d; simNodes[j].vx+=f*dx/d; simNodes[j].vy+=f*dy/d;
+          const minD = collision + Math.min(20, (simNodes[i].degree + simNodes[j].degree) * 0.4);
+          if (d < minD) {
+            const push = (minD - d) * 0.035;
+            simNodes[i].vx-=push*dx/d; simNodes[i].vy-=push*dy/d; simNodes[j].vx+=push*dx/d; simNodes[j].vy+=push*dy/d;
+          }
+        }
+      }
+      for (const l of links) {
+        const s=nodeMap.get(l.source), t=nodeMap.get(l.target); if(!s||!t)continue;
+        const dx=t.x-s.x,dy=t.y-s.y,d=Math.hypot(dx,dy)+1;
+        const linkLength = l.type === "same_source" ? springLength * 1.35 : springLength;
+        const linkSpring = l.type === "same_source" ? spring * 0.45 : spring;
+        const f=(d-linkLength)*linkSpring; s.vx+=f*dx/d;s.vy+=f*dy/d;t.vx-=f*dx/d;t.vy-=f*dy/d;
+      }
+      for (const n of simNodes) {
+        n.vx*=damping; n.vy*=damping; n.x+=n.vx; n.y+=n.vy;
+        if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) { n.x = W/2; n.y = H/2; n.vx = 0; n.vy = 0; }
+        tv+=Math.abs(n.vx)+Math.abs(n.vy);
+      }
+      if (iter>(simNodes.length > 350 ? 120 : 520)||tv<.35) settled=true;
     }
     let animId = 0;
+    function nodeRadius(n: any, scale: number) {
+      return (7 + Math.sqrt(Math.max(1, n.degree)) * 2.3 + n.confidence * 7) / Math.sqrt(scale);
+    }
+    function shouldLabel(n: any, scale: number) {
+      const hovered = hoveredNodeRef.current;
+      if (labelMode === "none") return hovered?.id === n.id;
+      if (labelMode === "all") return scale >= 0.55 || n.isKey || hovered?.id === n.id;
+      return n.isKey || hovered?.id === n.id || (scale > 1.45 && n.degree > 1);
+    }
+    function drawLabel(n: any, r: number, scale: number, boxes: Array<{x:number;y:number;w:number;h:number}>) {
+      if (!shouldLabel(n, scale)) return;
+      const raw = n.name || n.id;
+      const lbl = raw.length > 24 ? raw.slice(0, 22) + "…" : raw;
+      const fontSize = Math.max(11, Math.min(15, 12 / Math.sqrt(scale)));
+      ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+      const w = Math.min(260, ctx.measureText(lbl).width + 12);
+      const h = fontSize + 8;
+      const x = n.x - w / 2;
+      const y = n.y - r - h - 8 / scale;
+      const overlaps = boxes.some(b => x < b.x + b.w && x + w > b.x && y < b.y + b.h && y + h > b.y);
+      const hovered = hoveredNodeRef.current;
+      if (overlaps && hovered?.id !== n.id) return;
+      boxes.push({ x, y, w, h });
+      ctx.fillStyle = hovered?.id === n.id ? "rgba(18, 28, 26, 0.96)" : "rgba(8, 13, 12, 0.72)";
+      ctx.strokeStyle = hovered?.id === n.id ? "rgba(125, 255, 215, 0.55)" : "rgba(125, 255, 215, 0.16)";
+      ctx.lineWidth = 1 / scale;
+      roundRect(ctx, x, y, w, h, 5 / scale);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#e4fff5";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(lbl, n.x, y + h / 2);
+    }
     function draw() {
       resize(); const t = targetRef.current, tr = transformRef.current;
       tr.scale += (t.scale-tr.scale)*.12; tr.x += (t.x-tr.x)*.12; tr.y += (t.y-tr.y)*.12;
-      setZoomLevel(Math.round(tr.scale*100)/100);
+      const nextZoom = Math.round(tr.scale*100)/100;
+      if (Math.abs(nextZoom - lastZoom) >= 0.01) { lastZoom = nextZoom; setZoomLevel(nextZoom); }
       for (let i=0;i<3;i++) step();
       ctx.clearRect(0,0,W,H); ctx.save();
       ctx.translate(W/2+tr.x, H/2+tr.y); ctx.scale(tr.scale,tr.scale); ctx.translate(-W/2,-H/2);
-      for (const l of links) { const s=nodeMap.get(l.source),t=nodeMap.get(l.target); if(!s||!t)continue; ctx.beginPath();ctx.moveTo(s.x,s.y);ctx.lineTo(t.x,t.y); ctx.strokeStyle="rgba(45,212,160,0.35)";ctx.lineWidth=1.2/tr.scale;ctx.stroke(); }
-      for (const n of simNodes) { const r=(5+n.confidence*10)/tr.scale; ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2); ctx.fillStyle=n.color;ctx.fill();ctx.strokeStyle="rgba(0,0,0,0.3)";ctx.lineWidth=1.5/tr.scale;ctx.stroke(); const lbl=n.name.length>22?n.name.slice(0,20)+"…":n.name; ctx.fillStyle="#e0fff0"; ctx.font=`${Math.max(9,11/tr.scale)}px Inter`; ctx.textAlign="center"; ctx.fillText(lbl,n.x,n.y-r-4/tr.scale); }
+      for (const l of links) { const s=nodeMap.get(l.source),t=nodeMap.get(l.target); if(!s||!t)continue; ctx.beginPath();ctx.moveTo(s.x,s.y);ctx.lineTo(t.x,t.y); ctx.strokeStyle=l.type==="same_source"?"rgba(45,212,160,0.13)":"rgba(45,212,160,0.25)";ctx.lineWidth=(l.type==="same_source"?0.7:1.1)/tr.scale;ctx.stroke(); }
+      for (const n of simNodes) {
+        const r=nodeRadius(n,tr.scale);
+        ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);
+        ctx.fillStyle=n.color;ctx.fill();
+        const hovered = hoveredNodeRef.current;
+        ctx.strokeStyle=hovered?.id===n.id?"rgba(224,255,240,0.9)":"rgba(0,0,0,0.42)";
+        ctx.lineWidth=(hovered?.id===n.id?2.2:1.4)/tr.scale;ctx.stroke();
+      }
+      const labelBoxes: Array<{x:number;y:number;w:number;h:number}> = [];
+      for (const n of [...simNodes].sort((a,b)=>Number(a.isKey)-Number(b.isKey))) drawLabel(n,nodeRadius(n,tr.scale),tr.scale,labelBoxes);
       ctx.restore(); animId = requestAnimationFrame(draw);
     }
     draw();
     function world(e: MouseEvent) { const r = canvas!.getBoundingClientRect(); return { x: e.clientX-r.left, y: e.clientY-r.top }; }
+    function toGraphPoint(p: {x:number;y:number}) {
+      const tr = transformRef.current;
+      const wx=p.x-W/2,wy=p.y-H/2;
+      return { x:(wx-tr.x)/tr.scale+W/2, y:(wy-tr.y)/tr.scale+H/2 };
+    }
+    function hitNode(p: {x:number;y:number}) {
+      const gp = toGraphPoint(p);
+      const tr = transformRef.current;
+      let best: any = null;
+      let bestD = Infinity;
+      for (const n of simNodes) {
+        const d = Math.hypot(gp.x-n.x,gp.y-n.y);
+        const r = nodeRadius(n, tr.scale) + 8 / tr.scale;
+        if (d < r && d < bestD) { best = n; bestD = d; }
+      }
+      return best;
+    }
     let pan: any = null;
     canvas.onmousedown = e => { const p = world(e); let hit = false; const tr = transformRef.current;
-      for (const n of simNodes) { const r=(5+n.confidence*10)/tr.scale; const wx=p.x-W/2,wy=p.y-W/2; const nx=(wx-tr.x)/tr.scale+W/2, ny=(wy-tr.y)/tr.scale+H/2; if(Math.hypot(nx-n.x,ny-n.y)<r+6/tr.scale){targetRef.current={x:(W/2-n.x)*1.8,y:(H/2-n.y)*1.8,scale:1.8};onSelectNode(n.id);hit=true;break;}}
+      const n = hitNode(p);
+      if(n){targetRef.current={x:(W/2-n.x)*1.55,y:(H/2-n.y)*1.55,scale:1.55};onSelectNode(n.id);hit=true;}
       if(!hit) pan = { x:p.x, y:p.y, tx:tr.x, ty:tr.y }; };
-    window.onmousemove = e => { if(!pan) return; const p=world(e); transformRef.current.x=pan.tx+p.x-pan.x; transformRef.current.y=pan.ty+p.y-pan.y; targetRef.current.x=transformRef.current.x; targetRef.current.y=transformRef.current.y; };
+    window.onmousemove = e => {
+      const p=world(e);
+      if(!pan) {
+        const next = hitNode(p);
+        if (hoveredNodeRef.current?.id !== next?.id) {
+          hoveredNodeRef.current = next;
+          setHoveredNode(next);
+        }
+        return;
+      }
+      transformRef.current.x=pan.tx+p.x-pan.x; transformRef.current.y=pan.ty+p.y-pan.y; targetRef.current.x=transformRef.current.x; targetRef.current.y=transformRef.current.y;
+    };
     window.onmouseup = () => { pan = null; };
     canvas.onwheel = e => { e.preventDefault(); targetRef.current.scale=Math.max(.3,Math.min(5,targetRef.current.scale*(e.deltaY>0?.9:1.1))); };
     canvas.ondblclick = () => { targetRef.current = { x:0,y:0,scale:1 }; };
-    return () => { cancelAnimationFrame(animId); window.removeEventListener("resize",resize); };
-  }, [nodes, edges, onSelectNode]);
+    return () => {
+      cancelAnimationFrame(animId);
+      window.removeEventListener("resize",resize);
+      canvas.onmousedown = null;
+      canvas.onwheel = null;
+      canvas.ondblclick = null;
+      window.onmousemove = null;
+      window.onmouseup = null;
+    };
+  }, [nodes, edges, onSelectNode, labelMode]);
 
   if (nodes.length === 0) return <Empty icon={<Network size={48} style={{opacity:.3}} />} text="No graph data — compile documents first" />;
   return (
     <div style={{ flex: 1, position: "relative", overflow: "hidden", background: "var(--color-bg)" }}>
       <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+      <div style={{ position: "absolute", top: 12, left: 12, display: "flex", gap: 6, alignItems: "center", background: "color-mix(in srgb, var(--color-surface) 88%, transparent)", border: "1px solid var(--color-border)", borderRadius: 6, padding: 4 }}>
+        {(["key", "all", "none"] as const).map(mode => (
+          <button key={mode} className={labelMode === mode ? "btn btn-primary" : "btn"} style={{ padding: "4px 8px", fontSize: 11 }} onClick={() => setLabelMode(mode)}>
+            {mode === "key" ? "Key labels" : mode === "all" ? "All labels" : "No labels"}
+          </button>
+        ))}
+      </div>
+      {hoveredNode && (
+        <div style={{ position: "absolute", left: 12, bottom: 12, maxWidth: 360, background: "var(--color-surface)", border: "1px solid var(--color-border-glow)", borderRadius: 6, padding: "8px 10px", boxShadow: "0 10px 30px rgba(0,0,0,.28)" }}>
+          <div style={{ fontSize: 13, color: "var(--color-fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hoveredNode.name}</div>
+          <div style={{ marginTop: 4, fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-muted-fg)" }}>{hoveredNode.type || "node"} · {hoveredNode.degree || 0} links</div>
+        </div>
+      )}
       <div style={{ position: "absolute", bottom: 8, right: 8, fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-muted-fg)", background: "var(--color-surface)", padding: "3px 8px", borderRadius: 4 }}>
-        {Math.round(zoomLevel*100)}% · scroll · drag · click · dblclick
+        {Math.round(zoomLevel*100)}% · {nodes.length} nodes · {edges.length} edges · scroll · drag · click · dblclick
       </div>
     </div>
   );
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
 }
 
 // ═══════════════════════════════════════════════ SHARED
@@ -867,6 +1072,9 @@ function StatusBar({ wsName, pageCount, entityCount, edgeCount, compileDone, com
 }
 
 const OCR_MODEL_OPTIONS: Record<string, { v: string; l: string; desc: string }[]> = {
+  "unlimited-ocr-mlx": [
+    { v: "Unlimited-OCR-MLX", l: "Unlimited-OCR-MLX", desc: "ModelScope MLX OCR, macOS" },
+  ],
   "paddleocr-vl": [
     { v: "PaddleOCR-VL-1.5-8bit", l: "PaddleOCR-VL-1.5-8bit", desc: "MLX spotting, macOS" },
   ],
@@ -892,7 +1100,7 @@ function ocrModelOptions(engine: string, current: string) {
 }
 
 function defaultOcrModel(engine: string) {
-  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"])[0].v;
+  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["unlimited-ocr-mlx"])[0].v;
 }
 
 function ConfigModal({ onClose }: { onClose: () => void }) {
@@ -903,11 +1111,15 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [temperature, setTemperature] = useState("0.3");
   const [ocrUrl, setOcrUrl] = useState("");
-  const [ocrEngine, setOcrEngine] = useState("paddleocr-vl");
-  const [ocrModel, setOcrModel] = useState("PaddleOCR-VL-1.5-8bit");
+  const [ocrEngine, setOcrEngine] = useState("unlimited-ocr-mlx");
+  const [ocrModel, setOcrModel] = useState("Unlimited-OCR-MLX");
   const [ocrModelRoot, setOcrModelRoot] = useState("");
   const [ocrDevice, setOcrDevice] = useState("auto");
   const [ocrAutoDownload, setOcrAutoDownload] = useState(true);
+  const [unlimitedOcrTask, setUnlimitedOcrTask] = useState("document");
+  const [unlimitedOcrPrompt, setUnlimitedOcrPrompt] = useState("");
+  const [unlimitedOcrMaxNewTokens, setUnlimitedOcrMaxNewTokens] = useState("4096");
+  const [unlimitedOcrCropMode, setUnlimitedOcrCropMode] = useState(true);
   const [ocrLang, setOcrLang] = useState("chi_sim+eng");
   const [ocrEnabled, setOcrEnabled] = useState(true);
   const [maxResults, setMaxResults] = useState("5");
@@ -923,14 +1135,15 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
     try { const c = await invoke("get_full_config") as any;
       setProvider(c.model?.provider || "deepseek"); setApiKey(c.model?.apiKey || ""); setModel(c.model?.model || ""); setBaseUrl(c.model?.baseUrl || ""); setTemperature(String(c.model?.temperature || 0.3));
       setOcrUrl(c.liteparse?.ocrServerUrl || ""); setOcrLang(c.liteparse?.ocrLanguage || "chi_sim+eng"); setOcrEnabled(c.liteparse?.ocrEnabled !== false);
-      setOcrEngine(c.ocr?.engine || "paddleocr-vl"); setOcrModel(c.ocr?.model || "PaddleOCR-VL-1.5-8bit"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
+      setOcrEngine(c.ocr?.engine || "unlimited-ocr-mlx"); setOcrModel(c.ocr?.model || "Unlimited-OCR-MLX"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
+      setUnlimitedOcrTask(c.ocr?.options?.task || "document"); setUnlimitedOcrPrompt(c.ocr?.options?.prompt || ""); setUnlimitedOcrMaxNewTokens(String(c.ocr?.options?.max_new_tokens || 4096)); setUnlimitedOcrCropMode(c.ocr?.options?.crop_mode !== false);
       setMaxResults(String(c.query?.maxResults || 5));
     } catch {} })();
   }, []);
 
   const save = async () => {
     try {
-      await invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature: parseFloat(temperature) || 0.3, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults: parseInt(maxResults) || 5 } });
+      await invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature: parseFloat(temperature) || 0.3, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, unlimitedOcrTask, unlimitedOcrPrompt, unlimitedOcrMaxNewTokens: parseInt(unlimitedOcrMaxNewTokens) || 4096, unlimitedOcrCropMode, maxResults: parseInt(maxResults) || 5 } });
       setSaved(true); setTimeout(() => { onClose(); window.location.reload(); }, 800);
     } catch (e) { console.error(e); }
   };
@@ -953,11 +1166,17 @@ function ConfigModal({ onClose }: { onClose: () => void }) {
               <Field label="Temperature"><input value={temperature} onChange={e => setTemperature(e.target.value)} className="field-input" /></Field>
             </>}
             {tab === "liteparse" && <>
-              <Field label="OCR Engine"><select value={ocrEngine} onChange={e => changeOcrEngine(e.target.value)} className="field-input"><option value="paddleocr-vl">PaddleOCR-VL</option><option value="paddleocr">PaddleOCR PP-OCR</option><option value="mineru">MinerU</option><option value="deepseek-ocr">DeepSeek-OCR</option></select></Field>
+              <Field label="OCR Engine"><select value={ocrEngine} onChange={e => changeOcrEngine(e.target.value)} className="field-input"><option value="unlimited-ocr-mlx">Unlimited-OCR-MLX</option><option value="paddleocr-vl">PaddleOCR-VL</option><option value="paddleocr">PaddleOCR PP-OCR</option><option value="mineru">MinerU</option><option value="deepseek-ocr">DeepSeek-OCR</option></select></Field>
               <Field label="Model Root"><input value={ocrModelRoot} onChange={e => setOcrModelRoot(e.target.value)} placeholder="Leave empty for .wiki/models/ocr" className="field-input" /></Field>
               <Field label="OCR Model"><select value={ocrModel} onChange={e => setOcrModel(e.target.value)} className="field-input">{ocrModelOptions(ocrEngine, ocrModel).map(o => <option key={o.v} value={o.v}>{o.l} — {o.desc}</option>)}</select></Field>
               <Field label="Device"><select value={ocrDevice} onChange={e => setOcrDevice(e.target.value)} className="field-input"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">MPS</option></select></Field>
               <Field label="Auto Download"><input type="checkbox" checked={ocrAutoDownload} onChange={e => setOcrAutoDownload(e.target.checked)} /></Field>
+              {ocrEngine === "unlimited-ocr-mlx" && <>
+                <Field label="Unlimited Task"><select value={unlimitedOcrTask} onChange={e => setUnlimitedOcrTask(e.target.value)} className="field-input"><option value="document">Document</option><option value="text">Text</option><option value="figure">Figure</option><option value="free">Free OCR</option></select></Field>
+                <Field label="Custom Prompt"><input value={unlimitedOcrPrompt} onChange={e => setUnlimitedOcrPrompt(e.target.value)} placeholder="Overrides task prompt when set" className="field-input" /></Field>
+                <Field label="Max New Tokens"><input value={unlimitedOcrMaxNewTokens} onChange={e => setUnlimitedOcrMaxNewTokens(e.target.value)} className="field-input" /></Field>
+                <Field label="Dynamic Tiling"><input type="checkbox" checked={unlimitedOcrCropMode} onChange={e => setUnlimitedOcrCropMode(e.target.checked)} /></Field>
+              </>}
               <Field label="Advanced OCR Server URL"><input value={ocrUrl} onChange={e => setOcrUrl(e.target.value)} placeholder="Optional liteparse-compatible /ocr endpoint" className="field-input" /></Field>
               <Field label="OCR Language"><input value={ocrLang} onChange={e => setOcrLang(e.target.value)} className="field-input" /></Field>
               <Field label="OCR Enabled"><input type="checkbox" checked={ocrEnabled} onChange={e => setOcrEnabled(e.target.checked)} /></Field>

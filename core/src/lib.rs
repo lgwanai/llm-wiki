@@ -13,6 +13,7 @@ pub mod compile_prompt;
 pub mod config;
 pub mod consolidate;
 pub mod crystallize;
+pub mod dream;
 pub mod error;
 pub mod gen_chart;
 pub mod graph;

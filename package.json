@@ -9,9 +9,18 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:cli": "cargo build --release -p llm-wiki-cli",
+    "build:cli:all": "bash scripts/build-cli.sh --all",
+    "build:cli:macos-arm64": "bash scripts/build-cli.sh --target macos-arm64",
+    "build:cli:macos-x64": "bash scripts/build-cli.sh --target macos-x64",
+    "build:cli:windows-x64": "bash scripts/build-cli.sh --target windows-x64",
+    "build:cli:linux-x64": "bash scripts/build-cli.sh --target linux-x64",
+    "build:cli:linux-arm64": "bash scripts/build-cli.sh --target linux-arm64",
     "install:cli": "bash scripts/install-cli.sh",
     "package:desktop": "tauri build",
-    "package:all": "node scripts/package.mjs"
+    "package:desktop:current": "node scripts/package.mjs --skip-cli --skip-skill --skip-frontend",
+    "package:skill": "bash scripts/package-skill.sh",
+    "package:all": "node scripts/package.mjs",
+    "package:release": "node scripts/package.mjs --target all --setup"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

@@ -740,6 +740,7 @@ pub fn validate_config(config: &Config) -> Vec<String> {
         "paddle",
         "paddleocr",
         "deepseek-ocr",
+        "unlimited-ocr-mlx",
         "api",
     ];
     if !valid_backends.contains(&config.ocr.backend.as_str()) {
@@ -755,7 +756,13 @@ pub fn validate_config(config: &Config) -> Vec<String> {
         }
     }
 
-    let valid_ocr_engines = ["paddleocr", "paddleocr-vl", "mineru", "deepseek-ocr"];
+    let valid_ocr_engines = [
+        "unlimited-ocr-mlx",
+        "paddleocr",
+        "paddleocr-vl",
+        "mineru",
+        "deepseek-ocr",
+    ];
     if !valid_ocr_engines.contains(&config.ocr.engine.as_str()) {
         issues.push(format!(
             "ocr.engine: '{}' is invalid — must be one of {:?}",

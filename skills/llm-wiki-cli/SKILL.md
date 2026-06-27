@@ -7,6 +7,27 @@ description: Operate the llm-wiki Rust CLI for personal knowledge base workflows
 
 Use this skill to run the compiled `wiki` CLI and keep desktop and CLI configuration synchronized. Do not require users to install Rust or run `cargo` unless they are explicitly building from source.
 
+When compiling sources from this skill, default to Agent-powered compile mode. Do not call `wiki compile` unless the source is structured table data or the user explicitly asks to use the CLI/app configured model. Agent-powered compile keeps skill usage independent from llm-wiki model configuration, while app and normal CLI usage still require a configured LLM. Structured table files (`.csv`, `.tsv`, `.json`, `.xlsx`, `.xls`) are the exception: `wiki compile` imports them directly into Tables and does not call an LLM.
+
+Before Agent-powered compile, read and follow the bundled local standards:
+
+- [COMPILE_SPEC.md](COMPILE_SPEC.md) — skill Agent compile workflow, output template, and retrieval requirements.
+- [SCHEMA.md](SCHEMA.md) — wiki schema, entity types, relationship types, ingest rules, quality standards, and privacy rules.
+
+The `wiki compile-prompt` output also embeds the active wiki schema. Treat these bundled files as the skill-side reference and the emitted prompt as the per-run source of truth.
+
+## Prerequisites
+
+Before using this skill, verify the `wiki` CLI is installed:
+
+```bash
+wiki --version
+```
+
+If not found, direct the user to install the CLI binary first. The skill
+will not function without it. See the project README or
+[INSTALL.md](INSTALL.md) for per-platform instructions.
+
 ## Command Location
 
 Preferred user entrypoint:
@@ -105,16 +126,35 @@ Initialize:
 wiki init
 ```
 
-Compile a source file:
+Compile a source file with the default skill Agent mode:
+
+```bash
+LLM_WIKI_SKILL_AGENT=1 wiki compile-prompt /path/to/file.pdf --source-type doc > /tmp/llm-wiki-prompt.txt
+```
+
+Use the Agent's built-in language model to answer the generated system/user prompts. Follow `COMPILE_SPEC.md`, `SCHEMA.md`, and the generated prompt exactly. The generated prompt includes the same compile output template and active wiki schema used by configured-model compilation. The response must keep the normal llm-wiki compile format, including YAML frontmatter and `===PAGE_END===` delimiters.
+
+```bash
+LLM_WIKI_SKILL_AGENT=1 wiki compile-ingest /path/to/file.pdf --source-type doc --response /tmp/llm-wiki-response.md --lang en
+```
+
+Use the language value printed under `---METADATA---` from `compile-prompt` for `--lang`.
+
+Compile structured table files in skill mode without Agent generation:
+
+```bash
+wiki compile /path/to/file.csv --source-type doc
+wiki compile /path/to/file.xlsx --source-type doc
+```
+
+These commands import table-like data directly into the DuckDB-backed Tables store. Supported formats are CSV, TSV, JSON, XLSX, and XLS. Markdown sources compiled through `compile-prompt` also extract embedded Markdown tables into Tables before the Agent prompt is generated, replacing large table blocks with `[[table:...]]` links.
+
+Compile a directory in skill Agent mode by enumerating supported files and applying the same prompt/Agent/ingest flow to each file. Keep temporary prompt/response filenames unique per source file.
+
+Configured-model compile is available only when explicitly requested:
 
 ```bash
 wiki compile /path/to/file.pdf --source-type doc
-```
-
-Compile a directory:
-
-```bash
-wiki compile /path/to/docs --source-type doc --depth 3 -j 2
 ```
 
 Query:
@@ -129,6 +169,23 @@ Status and health:
 wiki status
 wiki lint
 ```
+
+Dream consolidation:
+
+```bash
+wiki dream
+```
+
+`dream` is manual only; never start it automatically. It returns immediately and runs a background worker. Any `wiki query`, app query, `wiki compile`, app compile, `compile-prompt`, or `compile-ingest` cancels the active dream worker before continuing. Use `wiki dream --foreground` only for debugging.
+
+The Rust CLI follows the `llm-wiki-skill` dream model:
+
+- Phase 1 Light Sleep directly updates existing page metadata from today's queries (`questions`, `keywords`, `facts`, dream touch counters).
+- Phase 2 Audit aggregates 7-day query logs and writes an Agent semantic-query-analysis task.
+- Phase 3 Purify directly applies deterministic duplicate cleanup: merge duplicate body paragraphs into the survivor page, mark duplicate pages as redirects, and update graph edges.
+- Phase 4 Enrich directly enriches low-density high-frequency pages with query-derived metadata and a `Dream Maintenance` body section, then writes deerflow/deep-research tasks to `dream/research-queue.jsonl`.
+
+Dream is unattended content maintenance, not report-only. It initialises an internal git repository inside `.wiki`, creates snapshots before/after content-changing phases, evaluates search quality after each phase, keeps stable/improved changes, rolls back significant retrieval degradation, and records lessons in `dream/experience.md`. Each new dream run writes `dream/YYYYMMDD-context.md` with prior experience so past failures remain in context.
 
 Package:
 

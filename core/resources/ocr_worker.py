@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 import base64
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
+import contextlib
+import time
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def normalize_lang(language):
@@ -25,6 +30,59 @@ def normalize_device(device):
     if device == "auto":
         return None
     return device
+
+
+def worker_options(req):
+    options = req.get("options") or {}
+    return options if isinstance(options, dict) else {}
+
+
+def option_value(req, name, default=None):
+    options = worker_options(req)
+    return options.get(name, req.get(name, default))
+
+
+def option_bool(req, name, default=False):
+    value = option_value(req, name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def option_int(req, name, default):
+    try:
+        return int(option_value(req, name, default))
+    except Exception:
+        return int(default)
+
+
+def option_float(req, name, default):
+    try:
+        return float(option_value(req, name, default))
+    except Exception:
+        return float(default)
+
+
+def unlimited_prompt(req):
+    prompt = option_value(req, "prompt")
+    if prompt:
+        return str(prompt)
+    task = str(option_value(req, "task", "document")).strip().lower()
+    prompts = {
+        "document": "document parsing.",
+        "parse": "document parsing.",
+        "markdown": "document parsing.",
+        "ocr": "Extract the text in the image.",
+        "text": "Extract the text in the image.",
+        "free": "Free OCR.",
+        "figure": "Parse the figure.",
+        "table": "document parsing.",
+        "formula": "document parsing.",
+        "structure": "document parsing.",
+    }
+    return prompts.get(task, "document parsing.")
 
 
 def build_paddleocr(req):
@@ -268,6 +326,122 @@ def parse_coordinate_text(text, width, height):
     return items
 
 
+def clean_model_text(text):
+    lines = []
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped in {"User: <image_placeholder>", "document parsing."}:
+            continue
+        if stripped.startswith("Assistant:"):
+            stripped = stripped[len("Assistant:"):].strip()
+            if not stripped:
+                continue
+        lines.append(stripped)
+    return "\n".join(lines).strip()
+
+
+def dynamic_preprocess_unlimited(image, min_num=2, max_num=32, image_size=640):
+    orig_width, orig_height = image.size
+    aspect_ratio = orig_width / orig_height
+    target_ratios = set()
+    for n in range(min_num, max_num + 1):
+        for i in range(1, n + 1):
+            for j in range(1, n + 1):
+                if min_num <= i * j <= max_num:
+                    target_ratios.add((i, j))
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+    best_ratio_diff = float("inf")
+    best_ratio = (1, 1)
+    area = orig_width * orig_height
+    for ratio in target_ratios:
+        target_aspect = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                best_ratio = ratio
+
+    target_width = image_size * best_ratio[0]
+    target_height = image_size * best_ratio[1]
+    resized = image.resize((target_width, target_height))
+    crops = []
+    for i in range(best_ratio[0] * best_ratio[1]):
+        col = i % best_ratio[0]
+        row = i // best_ratio[0]
+        crops.append(resized.crop((
+            col * image_size,
+            row * image_size,
+            (col + 1) * image_size,
+            (row + 1) * image_size,
+        )))
+    return crops, best_ratio
+
+
+def parse_unlimited_det_output(text, width, height):
+    cleaned = re.sub(r"<｜end▁of▁sentence｜>|<\|end▁of▁sentence\|>", "", text or "")
+    ref_pattern = re.compile(
+        r"<\|ref\|>\s*(?P<label>.*?)\s*<\|/ref\|>\s*"
+        r"<\|det\|>\s*(?P<coords>\[[^\]]+\])\s*<\|/det\|>",
+        re.DOTALL,
+    )
+    items = []
+    for match in ref_pattern.finditer(cleaned):
+        label = match.group("label").strip()
+        if not label:
+            continue
+        try:
+            coords_data = json.loads(match.group("coords"))
+        except Exception:
+            try:
+                coords_data = eval(match.group("coords"), {"__builtins__": {}}, {})
+            except Exception:
+                continue
+        if coords_data and isinstance(coords_data[0], (int, float)):
+            coords_data = [coords_data]
+        for coords in coords_data if isinstance(coords_data, list) else []:
+            if not isinstance(coords, (list, tuple)) or len(coords) < 4:
+                continue
+            vals = [float(v) for v in coords[:4]]
+            if max(abs(v) for v in vals) > 1.5:
+                vals = [vals[0] / 999.0, vals[1] / 999.0, vals[2] / 999.0, vals[3] / 999.0]
+            box = normalize_box(vals, width, height)
+            items.append({
+                "text": label,
+                "bbox": box,
+                "confidence": 0.9,
+                "polygon": box_polygon(box),
+            })
+
+    pattern = re.compile(
+        r"<\|det\|>\s*(?P<label>[^\[]*?)\s*"
+        r"\[\s*(?P<x1>-?\d+(?:\.\d+)?)\s*,\s*(?P<y1>-?\d+(?:\.\d+)?)\s*,\s*"
+        r"(?P<x2>-?\d+(?:\.\d+)?)\s*,\s*(?P<y2>-?\d+(?:\.\d+)?)\s*\]"
+        r"<\|/det\|>\s*(?P<content>.*?)(?=<\|det\|>|$)",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(cleaned):
+        content = match.group("content").strip()
+        if not content:
+            content = match.group("label").strip()
+        if not content:
+            continue
+        coords = [float(match.group(name)) for name in ("x1", "y1", "x2", "y2")]
+        if max(abs(v) for v in coords) > 1.5:
+            coords = [coords[0] / 1000.0, coords[1] / 1000.0, coords[2] / 1000.0, coords[3] / 1000.0]
+        box = normalize_box(coords, width, height)
+        items.append({
+            "text": content,
+            "bbox": box,
+            "confidence": 0.9,
+            "polygon": box_polygon(box),
+        })
+    return items
+
+
 def run_mineru(req, image_path):
     width = int(req["width"])
     height = int(req["height"])
@@ -359,6 +533,496 @@ def run_deepseek_ocr(req, image_path):
         )
 
 
+def run_unlimited_ocr_torch(req, image_path, model_path):
+    code_path = os.path.join(os.path.dirname(model_path), "Unlimited-OCR-code")
+    required = ["modeling_unlimitedocr.py", "deepencoder.py", "modeling_deepseekv2.py", "config.json"]
+    if not os.path.isdir(code_path) or any(not os.path.exists(os.path.join(code_path, name)) for name in required):
+        raise RuntimeError(
+            "PaddlePaddle/Unlimited-OCR code files are missing. Enable ocr.auto_download "
+            "or download them under the OCR model root as Unlimited-OCR-code."
+        )
+
+    try:
+        import torch
+        import torch.nn as torch_nn
+        from safetensors import safe_open
+        from transformers import AutoTokenizer
+        from transformers.generation.utils import GenerationMixin
+    except Exception as exc:
+        raise RuntimeError(
+            "Unlimited-OCR compatibility runtime requires torch, safetensors and transformers."
+        ) from exc
+
+    requested_device = normalize_device(req.get("device"))
+    if requested_device in {None, "auto", "mps"} and torch.backends.mps.is_available():
+        device = "mps"
+    elif requested_device == "cpu":
+        device = "cpu"
+    else:
+        raise RuntimeError("Unlimited-OCR compatibility runtime requires Apple MPS or device=cpu.")
+
+    package_root = tempfile.mkdtemp(prefix="unlimited_ocr_code_")
+    package_dir = os.path.join(package_root, "unlimited_ocr_code")
+    os.makedirs(package_dir, exist_ok=True)
+    for name in os.listdir(code_path):
+        if name.endswith((".py", ".json")):
+            shutil.copy2(os.path.join(code_path, name), os.path.join(package_dir, name))
+    with open(os.path.join(package_dir, "__init__.py"), "w", encoding="utf-8") as f:
+        f.write("")
+
+    old_path = list(sys.path)
+    old_cuda = getattr(torch.Tensor, "cuda", None)
+    try:
+        sys.path.insert(0, package_root)
+        from unlimited_ocr_code.modeling_unlimitedocr import (
+            BasicImageTransform,
+            SlidingWindowNoRepeatNgramProcessor,
+            UnlimitedOCRConfig,
+            UnlimitedOCRForCausalLM,
+            dynamic_preprocess,
+            text_encode,
+        )
+
+        # The original code was published for CUDA/Transformers<4.50. Patch the
+        # two compatibility points needed for local Apple Silicon inference.
+        torch.Tensor.cuda = lambda self, *args, **kwargs: self
+        torch_nn.Linear.reset_parameters = lambda self: None
+        torch_nn.LayerNorm.reset_parameters = lambda self: None
+        patched_cls = type(
+            "PatchedUnlimitedOCRForCausalLM",
+            (UnlimitedOCRForCausalLM, GenerationMixin),
+            {},
+        )
+
+        model = patched_cls(UnlimitedOCRConfig.from_pretrained(code_path)).eval()
+        weights_path = os.path.join(model_path, "model.safetensors")
+        if not os.path.exists(weights_path):
+            raise RuntimeError("Unlimited-OCR-MLX weights are missing: " + weights_path)
+
+        state = {}
+        with safe_open(weights_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key.startswith("language_model."):
+                    mapped = "model." + key[len("language_model."):]
+                elif key.startswith(("vision_model.", "sam_model.", "projector.")) or key in {
+                    "image_newline",
+                    "view_seperator",
+                }:
+                    mapped = "model." + key
+                else:
+                    mapped = key
+                state[mapped] = f.get_tensor(key)
+        model.load_state_dict(state, strict=False)
+        del state
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            use_fast=False,
+            fix_mistral_regex=True,
+        )
+
+        base_size = option_int(req, "base_size", 1024)
+        image_size = option_int(req, "image_size", 640)
+        patch_size = 16
+        downsample_ratio = 4
+        image_token_id = 128815
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
+        transform = BasicImageTransform(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), normalize=True)
+
+        tokenized = []
+        seq_mask = []
+        tokenized_sep = text_encode(tokenizer, "", bos=False, eos=False)
+        tokenized += tokenized_sep
+        seq_mask += [False] * len(tokenized_sep)
+
+        crop_mode = option_bool(req, "crop_mode", True)
+        if not crop_mode:
+            crop_ratio = [1, 1]
+            crops = []
+        elif image.size[0] <= image_size and image.size[1] <= image_size:
+            crop_ratio = [1, 1]
+            crops = []
+        else:
+            crops, crop_ratio = dynamic_preprocess(image, image_size=image_size)
+
+        global_view = ImageOps.pad(
+            image,
+            (base_size, base_size),
+            color=tuple(int(x * 255) for x in transform.mean),
+        )
+        images_list = [transform(global_view).to(torch.float16)]
+        crop_list = [transform(crop).to(torch.float16) for crop in crops]
+        width_crop_num, height_crop_num = crop_ratio
+
+        num_queries_base = math.ceil((base_size // patch_size) / downsample_ratio)
+        tokenized_image = ([image_token_id] * num_queries_base + [image_token_id]) * num_queries_base
+        tokenized_image += [image_token_id]
+        if width_crop_num > 1 or height_crop_num > 1:
+            num_queries = math.ceil((image_size // patch_size) / downsample_ratio)
+            tokenized_image += ([image_token_id] * (num_queries * width_crop_num) + [image_token_id]) * (
+                num_queries * height_crop_num
+            )
+        tokenized += tokenized_image
+        seq_mask += [True] * len(tokenized_image)
+
+        tokenized_sep = text_encode(tokenizer, unlimited_prompt(req), bos=False, eos=False)
+        tokenized += tokenized_sep
+        seq_mask += [False] * len(tokenized_sep)
+        tokenized = [0] + tokenized
+        seq_mask = [False] + seq_mask
+
+        input_ids = torch.LongTensor(tokenized).unsqueeze(0)
+        images_ori = torch.stack(images_list, dim=0)
+        images_crop = (
+            torch.stack(crop_list, dim=0)
+            if crop_list
+            else torch.zeros((1, 3, base_size, base_size), dtype=torch.float16)
+        )
+        images_spatial_crop = torch.tensor([[width_crop_num, height_crop_num]], dtype=torch.long)
+        images_seq_mask = torch.tensor(seq_mask, dtype=torch.bool).unsqueeze(0)
+
+        if device == "mps":
+            model = model.half().to(device)
+            input_ids = input_ids.to(device)
+            images_ori = images_ori.to(device)
+            images_crop = images_crop.to(device)
+            images_spatial_crop = images_spatial_crop.to(device)
+            images_seq_mask = images_seq_mask.to(device)
+        else:
+            model = model.float()
+            images_ori = images_ori.float()
+            images_crop = images_crop.float()
+
+        sliding_window = option_value(req, "sliding_window", None)
+        if sliding_window is None or str(sliding_window).strip().lower() in {"", "none", "off", "false", "0"}:
+            model.config.sliding_window = None
+        else:
+            model.config.sliding_window = int(sliding_window)
+
+        default_max_new = int(os.environ.get("LLM_WIKI_UNLIMITED_OCR_MAX_NEW_TOKENS") or 4096)
+        max_new_tokens = option_int(req, "max_new_tokens", option_int(req, "max_length", default_max_new))
+        max_new_tokens = max(1, min(max_new_tokens, 32768))
+        temperature = option_float(req, "temperature", 0.0)
+        generation_kwargs = {}
+        no_repeat_ngram_size = option_int(req, "no_repeat_ngram_size", 0)
+        ngram_window = option_int(req, "ngram_window", 0)
+        if no_repeat_ngram_size > 0 and ngram_window > 0:
+            generation_kwargs["logits_processor"] = [
+                SlidingWindowNoRepeatNgramProcessor(no_repeat_ngram_size, ngram_window)
+            ]
+        elif no_repeat_ngram_size > 0:
+            generation_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
+        print(
+            f"Running Unlimited-OCR compatibility runtime on {device}: "
+            f"{len(tokenized)} input tokens, {sum(seq_mask)} image tokens",
+            file=sys.stderr,
+        )
+        start = time.time()
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids=input_ids,
+                images=[(images_crop, images_ori)],
+                images_seq_mask=images_seq_mask,
+                images_spatial_crop=images_spatial_crop,
+                attention_mask=torch.ones_like(input_ids),
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else None,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+                **generation_kwargs,
+            )
+        elapsed = time.time() - start
+        output_tokens = output_ids[0, input_ids.shape[1]:].detach().cpu()
+        text = tokenizer.decode(output_tokens, skip_special_tokens=False).strip()
+        print(f"Unlimited-OCR compatibility runtime finished in {elapsed:.1f}s", file=sys.stderr)
+        return text
+    finally:
+        sys.path = old_path
+        if old_cuda is not None:
+            torch.Tensor.cuda = old_cuda
+        shutil.rmtree(package_root, ignore_errors=True)
+
+
+def run_unlimited_ocr_mlx(req, image_path):
+    width = int(req["width"])
+    height = int(req["height"])
+    model_path = req.get("model") or req.get("model_dir")
+    if not model_path or not os.path.exists(model_path):
+        raise RuntimeError("Unlimited-OCR-MLX model directory does not exist: " + str(model_path))
+
+    torch_error = None
+    try:
+        text = run_unlimited_ocr_torch(req, image_path, model_path)
+        text = clean_model_text(text)
+        items = parse_unlimited_det_output(text, width, height)
+        if not items:
+            items = parse_coordinate_text(text, width, height)
+        if not items:
+            items = line_box_items(str(text), width, height)
+        return items
+    except Exception as exc:
+        torch_error = exc
+        print(f"Unlimited-OCR compatibility runtime failed, falling back to MLX: {exc}", file=sys.stderr)
+
+    inference_py = os.path.join(model_path, "inference.py")
+    if os.path.exists(inference_py):
+        with open(inference_py, "r", encoding="utf-8") as f:
+            source = f.read()
+        patched = source.replace(
+            "use_fast=False,\n    )",
+            "use_fast=False,\n        fix_mistral_regex=True,\n    )",
+        ).replace(
+            "mx.ones((seq_len, seq_len), dtype=bool)",
+            "mx.ones((seq_len, seq_len), dtype=mx.bool_)",
+        ).replace(
+            "mx.array([seq_mask], dtype=bool)",
+            "mx.array([seq_mask], dtype=mx.bool_)",
+        ).replace(
+            "mx.array([seq_mask], dtype=mx.bool_)",
+            "mx.array(seq_mask[None, :], dtype=mx.bool_)",
+        ).replace(
+            "np.zeros(len(input_ids) + total_image_feats, dtype=mx.bool_)",
+            "np.zeros(len(input_ids) + total_image_feats, dtype=bool)",
+        ).replace(
+            """    # Reshape to [B, dim, src, src]
+    x = pos_embed.transpose(0, 3, 1, 2)
+    # Simple interpolation using reshape
+    # MLX doesn't have native interpolate, use simple scaling
+    x = x.reshape(B, dim, src * src)
+    x = x.reshape(B, dim, target_size, target_size)
+    x = x.transpose(0, 2, 3, 1)
+    return x
+""",
+            """    if src == target_size:
+        return pos_embed
+    idx = mx.array([round(i * (src - 1) / max(target_size - 1, 1)) for i in range(target_size)], dtype=mx.int32)
+    return mx.take(mx.take(pos_embed, idx, axis=1), idx, axis=2)
+""",
+        )
+        if patched != source:
+            with open(inference_py, "w", encoding="utf-8") as f:
+                f.write(patched)
+
+    model_py = os.path.join(model_path, "model.py")
+    if os.path.exists(model_py):
+        with open(model_py, "r", encoding="utf-8") as f:
+            source = f.read()
+        patched = source.replace(
+            """    # Reshape to [B, dim, src, src]
+    x = pos_embed.transpose(0, 3, 1, 2)
+    # Simple interpolation using reshape
+    # MLX doesn't have native interpolate, use simple scaling
+    x = x.reshape(B, dim, src * src)
+    x = x.reshape(B, dim, target_size, target_size)
+    x = x.transpose(0, 2, 3, 1)
+    return x
+""",
+            """    if src == target_size:
+        return pos_embed
+    idx = mx.array([round(i * (src - 1) / max(target_size - 1, 1)) for i in range(target_size)], dtype=mx.int32)
+    return mx.take(mx.take(pos_embed, idx, axis=1), idx, axis=2)
+""",
+        ).replace(
+            """                    # Scatter image features into positions where mask is True
+                    inputs_embeds = inputs_embeds.at[idx].set(
+                        mx.where(mask, img_feats, inputs_embeds[idx])
+                    )
+""",
+            """                    # Image positions are inserted as one contiguous span after BOS.
+                    image_start = 1
+                    image_len = img_feats.shape[0]
+                    updated = mx.concatenate(
+                        [
+                            inputs_embeds[idx, :image_start, :],
+                            img_feats,
+                            inputs_embeds[idx, image_start + image_len:, :],
+                        ],
+                        axis=0,
+                    )
+                    inputs_embeds = updated[None, :, :] if B == 1 else mx.concatenate(
+                        [inputs_embeds[:idx], updated[None, :, :], inputs_embeds[idx + 1:]],
+                        axis=0,
+                    )
+""",
+        )
+        if patched != source:
+            with open(model_py, "w", encoding="utf-8") as f:
+                f.write(patched)
+
+    try:
+        package_init = os.path.join(model_path, "__init__.py")
+        if os.path.exists(package_init):
+            spec = importlib.util.spec_from_file_location(
+                "unlimited_ocr_mlx",
+                package_init,
+                submodule_search_locations=[model_path],
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["unlimited_ocr_mlx"] = module
+            spec.loader.exec_module(module)
+            UnlimitedOCRInference = module.UnlimitedOCRInference
+        else:
+            if model_path not in sys.path:
+                sys.path.insert(0, model_path)
+            from unlimited_ocr_mlx import UnlimitedOCRInference
+    except Exception as exc:
+        raise RuntimeError(
+            "Unlimited-OCR-MLX requires the model repository code and dependencies: "
+            "mlx, mlx-lm, safetensors, transformers, Pillow and numpy."
+        ) from exc
+
+    try:
+        import mlx.nn as nn
+        original_load_weights = nn.Module.load_weights
+
+        def load_weights_compat(self, file_or_weights, strict=True):
+            try:
+                return original_load_weights(self, file_or_weights, strict=strict)
+            except ValueError as exc:
+                if strict and "parameters not in model" in str(exc):
+                    if isinstance(file_or_weights, list):
+                        from mlx.utils import tree_flatten
+
+                        valid = {name for name, _ in tree_flatten(self.parameters())}
+                        mapped = []
+                        for name, value in file_or_weights:
+                            if name.startswith("sam_model.neck."):
+                                parts = name.split(".", 3)
+                                if len(parts) == 4 and parts[2].isdigit():
+                                    name = f"sam_model.neck.layers.{parts[2]}.{parts[3]}"
+                            if name in valid:
+                                if name.endswith(".weight") and len(value.shape) == 4:
+                                    value = value.transpose(0, 2, 3, 1)
+                                mapped.append((name, value))
+                        return original_load_weights(self, mapped, strict=False)
+                    return original_load_weights(self, file_or_weights, strict=False)
+                raise
+
+        nn.Module.load_weights = load_weights_compat
+    except Exception:
+        pass
+
+    engine = UnlimitedOCRInference(model_path)
+    with contextlib.redirect_stdout(sys.stderr):
+        engine.load()
+        text = infer_unlimited_ocr_mlx_original_style(
+            engine,
+            req,
+            image_path,
+            max_length=option_int(req, "max_length", option_int(req, "max_new_tokens", 32768)),
+        )
+
+    text = clean_model_text(text)
+    items = parse_unlimited_det_output(text, width, height)
+    if not items:
+        items = parse_coordinate_text(text, width, height)
+    if not items:
+        if torch_error is not None:
+            print(f"Unlimited-OCR MLX fallback produced unstructured text after PyTorch error: {torch_error}", file=sys.stderr)
+        items = line_box_items(str(text), width, height)
+    return items
+
+
+def infer_unlimited_ocr_mlx_original_style(engine, req, image_path, max_length=32768):
+    import mlx.core as mx
+
+    tokenizer = engine.tokenizer
+    model = engine.model
+    base_size = option_int(req, "base_size", 1024)
+    image_size = option_int(req, "image_size", 640)
+    patch_size = 16
+    downsample_ratio = 4
+    image_token = "<image>"
+    image_token_id = 128815
+
+    image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
+    w, h = image.size
+
+    mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+    std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+
+    def to_tensor(img):
+        arr = np.array(img, dtype=np.float32) / 255.0
+        arr = (arr - mean) / std
+        return arr.transpose(2, 0, 1)
+
+    prompt = "<image>" + unlimited_prompt(req)
+    text_splits = prompt.split(image_token)
+    tokenized = []
+    seq_mask = []
+
+    # Original "plain" conversation template emits only user content plus an empty assistant turn.
+    tokenized_sep = tokenizer.encode(text_splits[0], add_special_tokens=False)
+    tokenized += tokenized_sep
+    seq_mask += [False] * len(tokenized_sep)
+
+    crop_mode = option_bool(req, "crop_mode", True)
+    if not crop_mode:
+        crop_ratio = (1, 1)
+        crop_images = []
+    elif w <= image_size and h <= image_size:
+        crop_ratio = (1, 1)
+        crop_images = []
+    else:
+        crop_images, crop_ratio = dynamic_preprocess_unlimited(image, image_size=image_size)
+
+    global_view = ImageOps.pad(image, (base_size, base_size), color=(127, 127, 127))
+    orig_arr = to_tensor(global_view)[None, ...]
+
+    width_crop_num, height_crop_num = crop_ratio
+    if crop_images and (width_crop_num > 1 or height_crop_num > 1):
+        patches_arr = np.stack([to_tensor(crop) for crop in crop_images], axis=0)
+        patches_mx = mx.array(patches_arr)
+    else:
+        patches_mx = None
+
+    num_queries_base = math.ceil((base_size // patch_size) / downsample_ratio)
+    tokenized_image = ([image_token_id] * num_queries_base + [image_token_id]) * num_queries_base
+    tokenized_image += [image_token_id]
+
+    if patches_mx is not None:
+        num_queries = math.ceil((image_size // patch_size) / downsample_ratio)
+        tokenized_image += ([image_token_id] * (num_queries * width_crop_num) + [image_token_id]) * (
+            num_queries * height_crop_num
+        )
+
+    tokenized += tokenized_image
+    seq_mask += [True] * len(tokenized_image)
+
+    tokenized_sep = tokenizer.encode(text_splits[-1], add_special_tokens=False)
+    tokenized += tokenized_sep
+    seq_mask += [False] * len(tokenized_sep)
+
+    tokenized = [tokenizer.bos_token_id] + tokenized
+    seq_mask = [False] + seq_mask
+
+    input_ids = mx.array([tokenized], dtype=mx.int32)
+    images_seq_mask = mx.array(np.array(seq_mask, dtype=bool)[None, :], dtype=mx.bool_)
+    orig_mx = mx.array(orig_arr)
+
+    print(f"Input: {len(tokenized)} tokens, {sum(seq_mask)} image tokens")
+    print("Running OCR inference...")
+    start = time.time()
+    output_ids = model.generate(
+        input_ids=input_ids,
+        images=[(patches_mx, orig_mx)],
+        images_seq_mask=images_seq_mask,
+        images_spatial_crop=[crop_ratio],
+        max_length=max_length,
+        temperature=option_float(req, "temperature", 0.0),
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    elapsed = time.time() - start
+    output_tokens = output_ids[0].tolist()[len(tokenized):]
+    text = tokenizer.decode(output_tokens, skip_special_tokens=True).strip()
+    print(f"\n=== OCR Result ({len(output_tokens)} tokens, {elapsed:.1f}s) ===")
+    print(text)
+    return text
+
+
 def as_box(poly):
     pts = np.asarray(poly, dtype=float).reshape(-1, 2)
     x_min = float(np.min(pts[:, 0]))
@@ -448,6 +1112,8 @@ def main():
             items = run_mineru(req, temp_path)
         elif req.get("engine") == "deepseek-ocr":
             items = run_deepseek_ocr(req, temp_path)
+        elif req.get("engine") == "unlimited-ocr-mlx":
+            items = run_unlimited_ocr_mlx(req, temp_path)
         else:
             ocr = build_paddleocr(req)
             if hasattr(ocr, "predict"):

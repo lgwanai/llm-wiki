@@ -79,16 +79,16 @@ ocr:
   # Local OCR is the default for PDF OCR. The app/CLI prepares the runtime
   # and downloads model weights on first use.
   mode: local
-  backend: paddleocr
+  backend: unlimited-ocr-mlx
 
-  # OCR engine: paddleocr | paddleocr-vl | mineru | deepseek-ocr
-  # paddleocr-vl uses MLX on macOS; paddleocr, mineru and deepseek-ocr are
-  # local Python model runtimes that return text boxes/polygons.
-  engine: paddleocr-vl
+  # OCR engine: unlimited-ocr-mlx | paddleocr | paddleocr-vl | mineru | deepseek-ocr
+  # unlimited-ocr-mlx and paddleocr-vl use MLX on macOS; paddleocr, mineru
+  # and deepseek-ocr are local Python model runtimes.
+  engine: unlimited-ocr-mlx
 
   # Model name or absolute model directory.
-  # Examples: PaddleOCR-VL-1.5-8bit | MinerU2.5 | DeepSeek-OCR-2
-  model: PaddleOCR-VL-1.5-8bit
+  # Examples: Unlimited-OCR-MLX | PaddleOCR-VL-1.5-8bit | MinerU2.5 | DeepSeek-OCR-2
+  model: Unlimited-OCR-MLX
 
   # Root directory containing OCR model folders.
   # Leave empty to use the current wiki's .wiki/models/ocr directory.
@@ -99,6 +99,19 @@ ocr:
 
   # Allow runtime/model setup under .wiki/runtime and .wiki/models.
   auto_download: true
+
+  # Engine-specific OCR options. Unlimited-OCR-MLX supports the original
+  # Unlimited-OCR document parsing prompt, dynamic tiling for long pages,
+  # 32K token generation, grounding box tags, and optional R-SWA sliding window.
+  options:
+    task: document          # document | text | figure | free
+    prompt: ""              # overrides task when set, e.g. "Extract the text in the image."
+    max_new_tokens: 4096    # up to 32768 for long documents
+    crop_mode: true         # dynamic tiling for large/long pages
+    no_repeat_ngram_size: 0 # set >0 to suppress repeated OCR loops
+    ngram_window: 0         # pairs with no_repeat_ngram_size for long outputs
+    sliding_window: ""      # empty disables; 128 enables the model's R-SWA window
+    temperature: 0.0
 
   # Legacy/API image OCR fields retained for image fallback workflows.
   api_provider: ""

@@ -3,6 +3,7 @@
 //! The first supported engine is PaddleOCR because it returns text boxes and
 //! polygons that map directly to liteparse's OCR merge contract.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -23,6 +24,7 @@ pub struct LocalOcrConfig {
     pub model_root: String,
     pub device: String,
     pub auto_download: bool,
+    pub options: HashMap<String, serde_yaml::Value>,
 }
 
 impl From<OcrConfig> for LocalOcrConfig {
@@ -37,6 +39,7 @@ impl From<OcrConfig> for LocalOcrConfig {
             model_root: value.model_root,
             device: value.device,
             auto_download: value.auto_download,
+            options: value.options,
         }
     }
 }
@@ -89,6 +92,7 @@ struct WorkerRequest<'a> {
     height: u32,
     rgb_base64: String,
     model_dir: String,
+    options: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +114,10 @@ fn default_confidence() -> f32 {
     1.0
 }
 
+fn ocr_options_json(config: &LocalOcrConfig) -> serde_json::Value {
+    serde_json::to_value(&config.options).unwrap_or_else(|_| serde_json::json!({}))
+}
+
 fn run_local_ocr(
     config: &LocalOcrConfig,
     image_data: &[u8],
@@ -125,6 +133,14 @@ fn run_local_ocr(
             run_paddleocr_vl(config, image_data, width, height, language)
         }
         "paddleocr" | "paddle" => run_paddleocr(config, image_data, width, height, language),
+        "unlimited-ocr-mlx" | "unlimited_ocr_mlx" | "unlimitedocrmlx" => run_model_worker(
+            "unlimited-ocr-mlx",
+            config,
+            image_data,
+            width,
+            height,
+            language,
+        ),
         "mineru" => run_model_worker("mineru", config, image_data, width, height, language),
         "deepseek-ocr" | "deepseekocr" => {
             run_model_worker("deepseek-ocr", config, image_data, width, height, language)
@@ -156,6 +172,7 @@ fn run_paddleocr_vl(
         height,
         rgb_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_data),
         model_dir: model_path_str.clone(),
+        options: ocr_options_json(config),
     };
 
     let mut child = Command::new(find_python()?)
@@ -214,6 +231,7 @@ fn run_model_worker(
         height,
         rgb_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_data),
         model_dir: model_path_str.clone(),
+        options: ocr_options_json(config),
     };
 
     let mut child = Command::new(find_python()?)
@@ -279,6 +297,7 @@ fn run_paddleocr(
         height,
         rgb_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_data),
         model_dir: model_dir.to_string_lossy().to_string(),
+        options: ocr_options_json(config),
     };
 
     let mut child = Command::new(python)
@@ -418,20 +437,33 @@ fn download_model(config: &LocalOcrConfig, root: &Path) -> WikiResult<()> {
     std::fs::create_dir_all(root)?;
     let model = config.model.trim();
     let engine = config.engine.as_str();
-    let model_id = match (engine, model) {
+    let (model_id, needs_unlimited_code) = match (engine, model) {
         ("paddleocr-vl" | "paddleocr_vl", "PaddleOCR-VL-1.5-8bit") => {
             if !cfg!(target_os = "macos") {
                 return Err(WikiError::Ocr(
                     "PaddleOCR-VL MLX weights are only supported on macOS. Use ocr.engine=paddleocr, mineru, or deepseek-ocr on this platform.".into(),
                 ));
             }
-            "mlx-community/PaddleOCR-VL-1.5-8bit"
+            ("mlx-community/PaddleOCR-VL-1.5-8bit", false)
         }
-        ("mineru", "MinerU2.5" | "mineru" | "default") => "OpenDataLab/MinerU2.5-2509-1.2B",
+        (
+            "unlimited-ocr-mlx" | "unlimited_ocr_mlx" | "unlimitedocrmlx",
+            "Unlimited-OCR-MLX" | "unlimited-ocr-mlx" | "default",
+        ) => {
+            if !cfg!(target_os = "macos") {
+                return Err(WikiError::Ocr(
+                    "Unlimited-OCR-MLX requires Apple MLX and is only supported on macOS Apple Silicon.".into(),
+                ));
+            }
+            ("LuojieLLMService/Unlimited-OCR-MLX", true)
+        }
+        ("mineru", "MinerU2.5" | "mineru" | "default") => {
+            ("OpenDataLab/MinerU2.5-2509-1.2B", false)
+        }
         ("deepseek-ocr" | "deepseekocr", "DeepSeek-OCR-2" | "deepseek-ocr-v2" | "default") => {
-            "deepseek-ai/DeepSeek-OCR-2"
+            ("deepseek-ai/DeepSeek-OCR-2", false)
         }
-        (_, other) if other.contains('/') => other,
+        (_, other) if other.contains('/') => (other, false),
         (_, other) => {
             return Err(WikiError::Ocr(format!(
                 "No downloader is configured for OCR model '{other}'. Use a full ModelScope model id or place it under {}.",
@@ -467,6 +499,52 @@ snapshot_download(
             "Failed to download OCR model '{model_id}' to {}",
             target.display()
         )));
+    }
+    if needs_unlimited_code {
+        let code_target = root.join("Unlimited-OCR-code");
+        std::fs::create_dir_all(&code_target)?;
+        let code = format!(
+            r#"
+from modelscope.hub.file_download import model_file_download
+files = [
+    "configuration_deepseek_v2.py",
+    "modeling_deepseekv2.py",
+    "configuration.json",
+    "processor_config.json",
+    "config.json",
+    "conversation.py",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+    "modeling_unlimitedocr.py",
+    "deepencoder.py",
+]
+for name in files:
+    model_file_download(
+        model_id="PaddlePaddle/Unlimited-OCR",
+        file_path=name,
+        cache_dir={cache_dir:?},
+        local_dir={target:?},
+        revision="master",
+    )
+"#,
+            cache_dir = root.join(".cache").to_string_lossy(),
+            target = code_target.to_string_lossy(),
+        );
+        let status = Command::new(find_python()?)
+            .arg("-c")
+            .arg(code)
+            .status()
+            .map_err(|e| {
+                WikiError::Ocr(format!(
+                    "Failed to start Unlimited-OCR code downloader: {e}"
+                ))
+            })?;
+        if !status.success() {
+            return Err(WikiError::Ocr(format!(
+                "Failed to download PaddlePaddle/Unlimited-OCR code files to {}",
+                code_target.display()
+            )));
+        }
     }
     Ok(())
 }

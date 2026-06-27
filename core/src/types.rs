@@ -129,7 +129,7 @@ pub struct OcrConfig {
     pub backend: String,
 
     /// Local OCR engine used for PDF OCR when liteparse OCR is enabled.
-    /// Supported values: paddleocr, paddleocr-vl, mineru, deepseek-ocr.
+    /// Supported values: unlimited-ocr-mlx, paddleocr, paddleocr-vl, mineru, deepseek-ocr.
     #[serde(default = "default_ocr_engine")]
     pub engine: String,
 
@@ -196,13 +196,13 @@ fn default_ocr_mode() -> String {
     "local".into()
 }
 fn default_ocr_backend() -> String {
-    "paddleocr".into()
+    "unlimited-ocr-mlx".into()
 }
 fn default_ocr_engine() -> String {
-    "paddleocr".into()
+    "unlimited-ocr-mlx".into()
 }
 fn default_ocr_model() -> String {
-    "PaddleOCR-VL-1.5-8bit".into()
+    "Unlimited-OCR-MLX".into()
 }
 fn default_ocr_model_root() -> String {
     if let Ok(path) = std::env::var("LLM_WIKI_OCR_MODEL_ROOT") {

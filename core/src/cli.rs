@@ -68,6 +68,34 @@ pub enum Commands {
         jobs: Option<usize>,
     },
 
+    /// Print the prompts needed for Agent-powered compilation
+    CompilePrompt {
+        /// Source file to compile
+        source: String,
+
+        /// Source type: doc, article, code, or conversation
+        #[arg(long, default_value = "doc")]
+        source_type: String,
+    },
+
+    /// Ingest an Agent-generated compile response into wiki pages
+    CompileIngest {
+        /// Source file represented by the compile response
+        source: String,
+
+        /// Source type: doc, article, code, or conversation
+        #[arg(long, default_value = "doc")]
+        source_type: String,
+
+        /// File containing the Agent response. Reads stdin when omitted.
+        #[arg(long)]
+        response: Option<String>,
+
+        /// Source language hint used by the compile parser
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
+
     /// Query wiki and get synthesized answer
     Query {
         /// Question to answer
@@ -88,6 +116,21 @@ pub enum Commands {
         /// Print search trace for retrieval debugging
         #[arg(long)]
         debug_search: bool,
+    },
+
+    /// Run four-phase dream consolidation in the background
+    Dream {
+        /// Run in the foreground instead of spawning a background worker
+        #[arg(long)]
+        foreground: bool,
+
+        /// Allow mechanical auto-execution in later phases when safety gates are available
+        #[arg(long)]
+        auto: bool,
+
+        /// Internal worker mode used by the non-blocking launcher
+        #[arg(long, hide = true)]
+        worker: bool,
     },
 
     /// Search diagnostics and evaluation
@@ -332,9 +375,9 @@ pub enum LedgerCmd {
         /// Natural language question
         question: String,
     },
-    /// Import CSV file as ledger table
+    /// Import CSV/TSV/JSON/Excel file as ledger table
     Import {
-        /// CSV or XLSX file path
+        /// CSV, TSV, JSON, XLSX, or XLS file path
         file: String,
         /// Table display name
         #[arg(long)]

@@ -6,6 +6,9 @@ let _invoke: any = null;
 async function invoke(cmd: string, args?: any) { if (!_invoke) { const m = await import("@tauri-apps/api/core"); _invoke = m.invoke; } return _invoke(cmd, args); }
 
 const OCR_MODEL_OPTIONS: Record<string, { v: string; l: string; desc: string }[]> = {
+  "unlimited-ocr-mlx": [
+    { v: "Unlimited-OCR-MLX", l: "Unlimited-OCR-MLX", desc: "ModelScope MLX OCR, macOS" },
+  ],
   "paddleocr-vl": [
     { v: "PaddleOCR-VL-1.5-8bit", l: "PaddleOCR-VL-1.5-8bit", desc: "MLX spotting, macOS" },
   ],
@@ -31,7 +34,7 @@ function ocrModelOptions(engine: string, current: string) {
 }
 
 function defaultOcrModel(engine: string) {
-  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["paddleocr-vl"])[0].v;
+  return (OCR_MODEL_OPTIONS[engine] || OCR_MODEL_OPTIONS["unlimited-ocr-mlx"])[0].v;
 }
 
 function SettingsWindow() {
@@ -42,11 +45,19 @@ function SettingsWindow() {
   const [baseUrl, setBaseUrl] = useState("");
   const [temperature, setTemperature] = useState(0.3);
   const [ocrUrl, setOcrUrl] = useState("");
-  const [ocrEngine, setOcrEngine] = useState("paddleocr-vl");
-  const [ocrModel, setOcrModel] = useState("PaddleOCR-VL-1.5-8bit");
+  const [ocrEngine, setOcrEngine] = useState("unlimited-ocr-mlx");
+  const [ocrModel, setOcrModel] = useState("Unlimited-OCR-MLX");
   const [ocrModelRoot, setOcrModelRoot] = useState("");
   const [ocrDevice, setOcrDevice] = useState("auto");
   const [ocrAutoDownload, setOcrAutoDownload] = useState(true);
+  const [unlimitedOcrTask, setUnlimitedOcrTask] = useState("document");
+  const [unlimitedOcrPrompt, setUnlimitedOcrPrompt] = useState("");
+  const [unlimitedOcrMaxNewTokens, setUnlimitedOcrMaxNewTokens] = useState(4096);
+  const [unlimitedOcrCropMode, setUnlimitedOcrCropMode] = useState(true);
+  const [unlimitedOcrNoRepeatNgramSize, setUnlimitedOcrNoRepeatNgramSize] = useState(0);
+  const [unlimitedOcrNgramWindow, setUnlimitedOcrNgramWindow] = useState(0);
+  const [unlimitedOcrSlidingWindow, setUnlimitedOcrSlidingWindow] = useState("");
+  const [unlimitedOcrTemperature, setUnlimitedOcrTemperature] = useState(0);
   const [ocrLang, setOcrLang] = useState("chi_sim+eng");
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const [maxResults, setMaxResults] = useState(5);
@@ -65,7 +76,8 @@ function SettingsWindow() {
     try { const c = await invoke("get_full_config") as any;
       setProvider(c.model?.provider || "deepseek"); setApiKey(c.model?.apiKey || ""); setModel(c.model?.model || ""); setBaseUrl(c.model?.baseUrl || ""); setTemperature(c.model?.temperature || 0.3);
       setOcrUrl(c.liteparse?.ocrServerUrl || ""); setOcrLang(c.liteparse?.ocrLanguage || "chi_sim+eng"); setOcrEnabled(c.liteparse?.ocrEnabled === true);
-      setOcrEngine(c.ocr?.engine || "paddleocr-vl"); setOcrModel(c.ocr?.model || "PaddleOCR-VL-1.5-8bit"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
+      setOcrEngine(c.ocr?.engine || "unlimited-ocr-mlx"); setOcrModel(c.ocr?.model || "Unlimited-OCR-MLX"); setOcrModelRoot(c.ocr?.modelRoot || ""); setOcrDevice(c.ocr?.device || "auto"); setOcrAutoDownload(c.ocr?.autoDownload !== false);
+      setUnlimitedOcrTask(c.ocr?.options?.task || "document"); setUnlimitedOcrPrompt(c.ocr?.options?.prompt || ""); setUnlimitedOcrMaxNewTokens(c.ocr?.options?.max_new_tokens || 4096); setUnlimitedOcrCropMode(c.ocr?.options?.crop_mode !== false); setUnlimitedOcrNoRepeatNgramSize(c.ocr?.options?.no_repeat_ngram_size || 0); setUnlimitedOcrNgramWindow(c.ocr?.options?.ngram_window || 0); setUnlimitedOcrSlidingWindow(c.ocr?.options?.sliding_window || ""); setUnlimitedOcrTemperature(c.ocr?.options?.temperature || 0);
       setMaxResults(c.query?.maxResults || 5);
       setStripSensitive(c.compile?.stripSensitive === true);
       setLoaded(true);
@@ -77,11 +89,11 @@ function SettingsWindow() {
     if (!loaded) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults, stripSensitive } });
+      invoke("save_config", { config: { provider, apiKey, model, baseUrl, temperature, ocrServerUrl: ocrUrl, ocrLanguage: ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, unlimitedOcrTask, unlimitedOcrPrompt, unlimitedOcrMaxNewTokens, unlimitedOcrCropMode, unlimitedOcrNoRepeatNgramSize, unlimitedOcrNgramWindow, unlimitedOcrSlidingWindow, unlimitedOcrTemperature, maxResults, stripSensitive } });
     }, 400);
   };
 
-  useEffect(autoSave, [provider, apiKey, model, baseUrl, temperature, ocrUrl, ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, maxResults, stripSensitive]);
+  useEffect(autoSave, [provider, apiKey, model, baseUrl, temperature, ocrUrl, ocrLang, ocrEnabled, ocrEngine, ocrModel, ocrModelRoot, ocrDevice, ocrAutoDownload, unlimitedOcrTask, unlimitedOcrPrompt, unlimitedOcrMaxNewTokens, unlimitedOcrCropMode, unlimitedOcrNoRepeatNgramSize, unlimitedOcrNgramWindow, unlimitedOcrSlidingWindow, unlimitedOcrTemperature, maxResults, stripSensitive]);
 
   const sections = [
     { id: "model", label: "Model", icon: <Cpu size={15} />, desc: "LLM provider & API settings" },
@@ -158,6 +170,7 @@ function SettingsWindow() {
             <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
               <ToggleField label="OCR Enabled" value={ocrEnabled} onChange={setOcrEnabled} desc="Enable OCR for text-sparse pages and embedded images" />
               <SelectField label="OCR Engine" value={ocrEngine} onChange={changeOcrEngine} options={[
+                { v: "unlimited-ocr-mlx", l: "Unlimited-OCR-MLX", desc: "Default local MLX OCR" },
                 { v: "paddleocr-vl", l: "PaddleOCR-VL", desc: "Local spotting model" },
                 { v: "paddleocr", l: "PaddleOCR PP-OCR", desc: "Local text boxes" },
                 { v: "mineru", l: "MinerU", desc: "Local document parser boxes" },
@@ -172,6 +185,21 @@ function SettingsWindow() {
                 { v: "mps", l: "MPS", desc: "Apple Silicon" },
               ]} />
               <ToggleField label="Auto Download" value={ocrAutoDownload} onChange={setOcrAutoDownload} desc="Create the local runtime and download OCR model weights when first used" />
+              {ocrEngine === "unlimited-ocr-mlx" && <>
+                <SelectField label="Unlimited Task" value={unlimitedOcrTask} onChange={setUnlimitedOcrTask} options={[
+                  { v: "document", l: "Document", desc: "Full document parsing" },
+                  { v: "text", l: "Text", desc: "Plain OCR text extraction" },
+                  { v: "figure", l: "Figure", desc: "Parse figures and diagrams" },
+                  { v: "free", l: "Free OCR", desc: "General OCR prompt" },
+                ]} />
+                <TextField label="Custom Prompt" value={unlimitedOcrPrompt} onChange={setUnlimitedOcrPrompt} placeholder="Overrides task prompt when set" />
+                <NumberField label="Max New Tokens" value={unlimitedOcrMaxNewTokens} onChange={setUnlimitedOcrMaxNewTokens} min={1} max={32768} />
+                <ToggleField label="Dynamic Tiling" value={unlimitedOcrCropMode} onChange={setUnlimitedOcrCropMode} desc="Tile large pages for long-document OCR" />
+                <NumberField label="No Repeat Ngram" value={unlimitedOcrNoRepeatNgramSize} onChange={setUnlimitedOcrNoRepeatNgramSize} min={0} max={20} />
+                <NumberField label="Ngram Window" value={unlimitedOcrNgramWindow} onChange={setUnlimitedOcrNgramWindow} min={0} max={32768} />
+                <TextField label="Sliding Window" value={unlimitedOcrSlidingWindow} onChange={setUnlimitedOcrSlidingWindow} placeholder="Empty disables; 128 enables R-SWA window" />
+                <NumberField label="Temperature" value={unlimitedOcrTemperature} onChange={setUnlimitedOcrTemperature} min={0} max={2} step={0.1} />
+              </>}
               <TextField label="Advanced OCR Server URL" value={ocrUrl} onChange={setOcrUrl} placeholder="Optional liteparse-compatible /ocr endpoint" />
               <TextField label="OCR Language" value={ocrLang} onChange={setOcrLang} placeholder="chi_sim+eng" />
             </div>
@@ -234,6 +262,23 @@ function SelectField({ label, value, onChange, options }: { label: string; value
       <select value={value} onChange={e => onChange(e.target.value)} className="field-input">
         {options.map(o => <option key={o.v} value={o.v}>{o.l} — {o.desc}</option>)}
       </select>
+    </div>
+  );
+}
+
+function NumberField({ label, value, onChange, min, max, step = 1 }: { label: string; value: number; onChange: (v: number) => void; min: number; max: number; step?: number }) {
+  return (
+    <div>
+      <Label text={label} />
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={e => onChange(Number(e.target.value))}
+        className="field-input"
+      />
     </div>
   );
 }

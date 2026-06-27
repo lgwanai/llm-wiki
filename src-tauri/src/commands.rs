@@ -267,7 +267,7 @@ fn gather_files(
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ![
                     "md", "markdown", "mdown", "txt", "pdf", "png", "jpg", "jpeg", "svg", "py",
-                    "rs", "js", "ts", "json", "yaml", "toml", "html", "xlsx", "xls",
+                    "rs", "js", "ts", "json", "csv", "tsv", "yaml", "toml", "html", "xlsx", "xls",
                 ]
                 .contains(&ext)
                 {
@@ -350,15 +350,18 @@ pub fn save_compile_state(path: &str, pages: usize) {
 
 #[tauri::command]
 pub async fn compile_source_file(path: String) -> Result<serde_json::Value, String> {
+    llm_wiki_core::dream::cancel_active_dream("desktop compile started");
     tauri::async_runtime::spawn_blocking(move || {
         let source_path = std::path::Path::new(&path);
         let ext = source_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
 
-        // Route JSON / Excel to ledger import instead of LLM compile
-        if ext == "json" || ext == "xlsx" || ext == "xls" {
+        // Route structured data files to ledger import instead of LLM compile.
+        if ext == "json" || ext == "csv" || ext == "tsv" || ext == "xlsx" || ext == "xls" {
             let name = source_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             let result = if ext == "json" {
                 llm_wiki_core::ledger::import_json(&path, Some(&name))
+            } else if ext == "csv" || ext == "tsv" {
+                llm_wiki_core::ledger::import_csv(&path, Some(&name))
             } else {
                 llm_wiki_core::ledger::import_excel(&path, Some(&name))
             };
@@ -393,6 +396,7 @@ pub async fn chat_query(
     question: String,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    llm_wiki_core::dream::cancel_active_dream("desktop query started");
     let start = std::time::Instant::now();
     let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
 
@@ -439,6 +443,25 @@ pub async fn chat_query(
             );
             let answer = llm_wiki_core::llm::call_llm_default(&system, &user)
                 .unwrap_or_else(|e| format!("LLM error: {e}"));
+            let query_answer = llm_wiki_core::types::QueryAnswer {
+                question: question.clone(),
+                answer: answer.clone(),
+                format: "markdown".to_string(),
+                sources: results
+                    .iter()
+                    .map(|r| llm_wiki_core::types::SourceCitation {
+                        id: r.id.clone(),
+                        name: r.title.as_deref().unwrap_or(&r.id).to_string(),
+                        path: r.path.to_string_lossy().to_string(),
+                        page_type: r.entity_type.as_deref().unwrap_or("unknown").to_string(),
+                        relevance: r.rrf_score.unwrap_or(r.score),
+                    })
+                    .collect(),
+                debug_search: None,
+            };
+            if let Err(e) = llm_wiki_core::dream::log_query(&query_answer, true) {
+                eprintln!("Query log error: {e}");
+            }
             let gen_time = t1.elapsed().as_secs_f64();
             serde_json::json!({
                 "answer": answer, "sources": sources,
@@ -493,7 +516,7 @@ pub fn get_table_content(table: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     // Use parameterized query via format with validated name
     let mut stmt = conn
-        .prepare(&format!("SELECT * FROM \"{}\"", table))
+        .prepare(&format!("SELECT * FROM \"{}\" LIMIT 1000", table))
         .map_err(|e| e.to_string())?;
     let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
     let rows = stmt
@@ -506,7 +529,10 @@ pub fn get_table_content(table: String) -> Result<String, String> {
             Ok(serde_json::Value::Object(obj))
         })
         .map_err(|e| e.to_string())?;
-    let data: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+    let mut data = Vec::new();
+    for row in rows {
+        data.push(row.map_err(|e| e.to_string())?);
+    }
     serde_json::to_string_pretty(&data).map_err(|e| e.to_string())
 }
 
@@ -599,6 +625,24 @@ pub fn save_config(config: serde_json::Value) -> Result<(), String> {
                     "ocrModelRoot" => set_nested(ex, "ocr", "model_root", v),
                     "ocrDevice" => set_nested(ex, "ocr", "device", v),
                     "ocrAutoDownload" => set_nested(ex, "ocr", "auto_download", v),
+                    "unlimitedOcrTask" => set_nested3(ex, "ocr", "options", "task", v),
+                    "unlimitedOcrPrompt" => set_nested3(ex, "ocr", "options", "prompt", v),
+                    "unlimitedOcrMaxNewTokens" => {
+                        set_nested3(ex, "ocr", "options", "max_new_tokens", v)
+                    }
+                    "unlimitedOcrCropMode" => set_nested3(ex, "ocr", "options", "crop_mode", v),
+                    "unlimitedOcrNoRepeatNgramSize" => {
+                        set_nested3(ex, "ocr", "options", "no_repeat_ngram_size", v)
+                    }
+                    "unlimitedOcrNgramWindow" => {
+                        set_nested3(ex, "ocr", "options", "ngram_window", v)
+                    }
+                    "unlimitedOcrSlidingWindow" => {
+                        set_nested3(ex, "ocr", "options", "sliding_window", v)
+                    }
+                    "unlimitedOcrTemperature" => {
+                        set_nested3(ex, "ocr", "options", "temperature", v)
+                    }
                     "maxResults" => set_nested(ex, "query", "max_results", v),
                     "stripSensitive" => set_nested(ex, "compile", "strip_sensitive", v),
                     _ => {
@@ -623,7 +667,7 @@ pub fn get_full_config() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "model": { "provider": llm.provider, "apiKey": llm.api_key, "model": llm.model, "baseUrl": llm.base_url, "temperature": llm.temperature, "maxTokens": llm.max_tokens },
         "liteparse": { "ocrServerUrl": liteparse.ocr_server_url, "ocrLanguage": liteparse.ocr_language, "ocrEnabled": liteparse.ocr_enabled, "dpi": liteparse.dpi },
-        "ocr": { "engine": cfg.ocr.engine, "model": cfg.ocr.model, "modelRoot": cfg.ocr.model_root, "device": cfg.ocr.device, "autoDownload": cfg.ocr.auto_download },
+        "ocr": { "engine": cfg.ocr.engine, "model": cfg.ocr.model, "modelRoot": cfg.ocr.model_root, "device": cfg.ocr.device, "autoDownload": cfg.ocr.auto_download, "options": cfg.ocr.options },
         "query": { "maxResults": cfg.query.max_results, "llmSynthesis": cfg.query.llm_synthesis },
         "compile": { "stripSensitive": cfg.compile.strip_sensitive },
     }))
@@ -643,6 +687,32 @@ fn set_nested(
     } else {
         // Replace non-object with a new object containing this key
         *entry = serde_json::json!({key: value});
+    }
+}
+
+fn set_nested3(
+    ex: &mut serde_json::Map<String, serde_json::Value>,
+    section: &str,
+    subsection: &str,
+    key: &str,
+    value: &serde_json::Value,
+) {
+    let entry = ex
+        .entry(section.to_string())
+        .or_insert(serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    if let Some(section_obj) = entry.as_object_mut() {
+        let nested = section_obj
+            .entry(subsection.to_string())
+            .or_insert(serde_json::json!({}));
+        if !nested.is_object() {
+            *nested = serde_json::json!({});
+        }
+        if let Some(nested_obj) = nested.as_object_mut() {
+            nested_obj.insert(key.to_string(), value.clone());
+        }
     }
 }
 

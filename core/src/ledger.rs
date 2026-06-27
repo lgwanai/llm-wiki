@@ -2,6 +2,7 @@
 //! CRUD: create, insert, show, update-schema, delete, stats, import/export.
 
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use crate::config::get_ledger_db_path;
@@ -30,13 +31,24 @@ fn duck_type(t: &str) -> &str {
 }
 
 pub fn slugify(name: &str) -> String {
-    name.to_lowercase()
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    let hash = format!("{:x}", hasher.finish());
+    let slug = name
+        .to_lowercase()
         .replace([' ', '_'], "-")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect::<String>()
         .trim_matches('-')
-        .to_string()
+        .to_string();
+    if !slug.is_empty() {
+        if name.chars().any(|c| !c.is_ascii()) {
+            return format!("{slug}-{}", &hash[..12]);
+        }
+        return slug;
+    }
+    format!("table-{hash}")
 }
 
 fn get_conn(read_only: bool) -> WikiResult<duckdb::Connection> {
@@ -317,6 +329,7 @@ pub fn import_json(file: &str, name: Option<&str>) -> WikiResult<String> {
     let table_name = name
         .map(|n| slugify(n))
         .unwrap_or_else(|| slugify(&path.file_stem().unwrap_or_default().to_string_lossy()));
+    let _ = delete_table(&table_name);
 
     // Infer column types from first row
     let first = &data[0];
@@ -333,7 +346,7 @@ pub fn import_json(file: &str, name: Option<&str>) -> WikiResult<String> {
         name.unwrap_or(&table_name),
         &fields_json,
         None,
-        true,
+        false,
         Some(&table_name),
         "",
     )?;
@@ -354,18 +367,100 @@ pub fn import_excel(file: &str, name: Option<&str>) -> WikiResult<String> {
         return Err(WikiError::NotFound(format!("File not found: {file}")));
     }
 
-    // Use Python to convert xlsx to JSON
+    // Use Python to convert xlsx to JSON. openpyxl is preferred for normal files; the XML
+    // fallback ignores styles, which keeps data import working when a workbook has invalid style
+    // metadata that openpyxl refuses to load.
+    let path_json = serde_json::to_string(&path.to_string_lossy().to_string())?;
     let python_script = format!(
-        r#"import json,sys; import openpyxl
-wb = openpyxl.load_workbook(r'{}', data_only=True)
-ws = wb.active
-headers = [cell.value for cell in ws[1]]
-rows = []
-for row in ws.iter_rows(min_row=2, values_only=True):
-    rows.append({{headers[i]: str(v) if v is not None else None for i,v in enumerate(row)}})
+        r#"import json, re, zipfile, xml.etree.ElementTree as ET
+path = {path_json}
+
+def clean_header(value, index):
+    if value is None or str(value).strip() == "":
+        return f"col_{{index + 1}}"
+    return str(value).strip()
+
+def normalize_rows(raw_rows):
+    raw_rows = [row for row in raw_rows if any(v is not None and str(v).strip() for v in row)]
+    if len(raw_rows) < 2:
+        return []
+    headers = [clean_header(v, i) for i, v in enumerate(raw_rows[0])]
+    rows = []
+    for raw in raw_rows[1:]:
+        obj = {{}}
+        for i, header in enumerate(headers):
+            value = raw[i] if i < len(raw) else None
+            obj[header] = str(value) if value is not None else None
+        if any(v is not None and str(v).strip() for v in obj.values()):
+            rows.append(obj)
+    return rows
+
+def read_with_openpyxl():
+    import openpyxl
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb.active
+    raw_rows = []
+    for row in ws.iter_rows(values_only=True):
+        raw_rows.append(list(row))
+    return normalize_rows(raw_rows)
+
+def col_index(cell_ref):
+    letters = re.sub(r"[^A-Z]", "", cell_ref.upper())
+    n = 0
+    for ch in letters:
+        n = n * 26 + ord(ch) - ord("A") + 1
+    return max(n - 1, 0)
+
+def xml_text(node):
+    return "".join(node.itertext()) if node is not None else None
+
+def read_with_xlsx_xml():
+    with zipfile.ZipFile(path) as zf:
+        shared = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.findall(".//{{*}}si"):
+                shared.append(xml_text(si) or "")
+
+        sheet_path = "xl/worksheets/sheet1.xml"
+        if "xl/workbook.xml" in zf.namelist() and "xl/_rels/workbook.xml.rels" in zf.namelist():
+            wb = ET.fromstring(zf.read("xl/workbook.xml"))
+            rel_id = None
+            first_sheet = wb.find(".//{{*}}sheet")
+            if first_sheet is not None:
+                rel_id = first_sheet.attrib.get("{{http://schemas.openxmlformats.org/officeDocument/2006/relationships}}id")
+            if rel_id:
+                rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+                for rel in rels.findall(".//{{*}}Relationship"):
+                    if rel.attrib.get("Id") == rel_id:
+                        target = rel.attrib.get("Target", "")
+                        sheet_path = "xl/" + target.lstrip("/")
+                        break
+
+        root = ET.fromstring(zf.read(sheet_path))
+        raw_rows = []
+        for row in root.findall(".//{{*}}sheetData/{{*}}row"):
+            values = []
+            for cell in row.findall("{{*}}c"):
+                idx = col_index(cell.attrib.get("r", "A1"))
+                while len(values) <= idx:
+                    values.append(None)
+                value = xml_text(cell.find("{{*}}v"))
+                if cell.attrib.get("t") == "s" and value not in (None, ""):
+                    value = shared[int(value)]
+                elif cell.attrib.get("t") == "inlineStr":
+                    value = xml_text(cell.find("{{*}}is"))
+                values[idx] = value
+            raw_rows.append(values)
+        return normalize_rows(raw_rows)
+
+try:
+    rows = read_with_openpyxl()
+except Exception:
+    rows = read_with_xlsx_xml()
+
 print(json.dumps(rows, ensure_ascii=False))
-"#,
-        path.display()
+"#
     );
 
     let output = duct::cmd(python_command(), ["-c".to_string(), python_script])
@@ -388,6 +483,7 @@ print(json.dumps(rows, ensure_ascii=False))
     let table_name = name
         .map(|n| slugify(n))
         .unwrap_or_else(|| slugify(&path.file_stem().unwrap_or_default().to_string_lossy()));
+    let _ = delete_table(&table_name);
 
     let first = &data[0];
     let mut fields = Vec::new();
@@ -402,7 +498,7 @@ print(json.dumps(rows, ensure_ascii=False))
         name.unwrap_or(&table_name),
         &fields_json,
         None,
-        true,
+        false,
         Some(&table_name),
         "",
     )?;
@@ -442,77 +538,94 @@ pub fn import_csv(file: &str, name: Option<&str>) -> WikiResult<String> {
         return Err(WikiError::NotFound(format!("File not found: {file}")));
     }
 
-    let content = fs::read_to_string(&path)?;
-    let mut lines = content.lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| WikiError::Parse("CSV has no header".into()))?;
-    let cols: Vec<&str> = header
-        .split(',')
-        .map(|s| s.trim().trim_matches('"'))
-        .collect();
+    let display_name = name.map(|n| n.to_string()).unwrap_or_else(|| {
+        path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
+    let table_name = slugify(&display_name);
+    let _ = delete_table(&table_name);
 
-    // Infer types from first data row
-    let mut type_hints: Vec<&str> = vec!["string"; cols.len()];
-    if let Some(first) = lines.clone().next() {
-        let vals: Vec<&str> = first.split(',').collect();
-        for (i, v) in vals.iter().enumerate() {
-            if i < cols.len() {
-                if v.parse::<i64>().is_ok() {
-                    type_hints[i] = "integer";
-                } else if v.parse::<f64>().is_ok() {
-                    type_hints[i] = "number";
-                }
+    let delimiter = if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("tsv"))
+        .unwrap_or(false)
+    {
+        b'\t'
+    } else {
+        b','
+    };
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_path(&path)
+        .map_err(|e| WikiError::Parse(format!("CSV open failed: {e}")))?;
+    let headers: Vec<String> = rdr
+        .headers()
+        .map_err(|e| WikiError::Parse(format!("CSV header failed: {e}")))?
+        .iter()
+        .map(|h| h.trim_start_matches('\u{feff}').trim().to_string())
+        .collect();
+    if headers.is_empty() {
+        return Err(WikiError::Parse("CSV has no header".into()));
+    }
+
+    let mut records = Vec::new();
+    for rec in rdr.records() {
+        let rec = rec.map_err(|e| WikiError::Parse(format!("CSV row failed: {e}")))?;
+        records.push(rec);
+    }
+    if records.is_empty() {
+        return Err(WikiError::Parse("CSV has no data rows".into()));
+    }
+
+    let mut type_hints: Vec<&str> = vec!["string"; headers.len()];
+    if let Some(first) = records.first() {
+        for (i, v) in first.iter().enumerate().take(headers.len()) {
+            if v.parse::<i64>().is_ok() {
+                type_hints[i] = "integer";
+            } else if v.parse::<f64>().is_ok() {
+                type_hints[i] = "number";
             }
         }
     }
 
-    let fields: Vec<serde_json::Value> = cols
+    let fields: Vec<serde_json::Value> = headers
         .iter()
         .enumerate()
-        .map(
-            |(i, c)| serde_json::json!({"name": c.trim().trim_matches('"'), "type": type_hints[i]}),
-        )
+        .map(|(i, c)| serde_json::json!({"name": c, "type": type_hints[i]}))
         .collect();
 
     let table_name = create_table(
-        name.unwrap_or(&path.file_stem().unwrap_or_default().to_string_lossy()),
+        &display_name,
         &serde_json::to_string(&fields)?,
         None,
-        true,
-        None,
+        false,
+        Some(&table_name),
         "",
     )?;
 
-    let mut inserted = 0;
-    let conn = get_conn(false)?;
-    for line in lines {
-        let vals: Vec<String> = line
-            .split(',')
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .collect();
-        if vals.len() != cols.len() {
-            continue;
+    for rec in records {
+        let mut obj = serde_json::Map::new();
+        for (i, header) in headers.iter().enumerate() {
+            let value = rec.get(i).unwrap_or("").trim();
+            let json_value = if value.is_empty() {
+                serde_json::Value::Null
+            } else if let Ok(n) = value.parse::<i64>() {
+                serde_json::json!(n)
+            } else if let Ok(n) = value.parse::<f64>() {
+                serde_json::json!(n)
+            } else {
+                serde_json::json!(value)
+            };
+            obj.insert(header.clone(), json_value);
         }
-        let placeholders: Vec<&str> = vec!["?"; vals.len()];
-        let col_names: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
-        let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({})",
-            table_name,
-            col_names.join(", "),
-            placeholders.join(", ")
-        );
-        if conn
-            .execute(&sql, duckdb::params_from_iter(vals.iter()))
-            .is_ok()
-        {
-            inserted += 1;
-        }
+        let json_str = serde_json::to_string(&serde_json::Value::Object(obj))?;
+        insert_data(&table_name, &json_str, true)?;
     }
 
-    conn.execute(
-        "UPDATE _registry SET record_count = ? WHERE actual_name = ?",
-        duckdb::params![inserted as i64, table_name],
-    )?;
     Ok(table_name)
 }

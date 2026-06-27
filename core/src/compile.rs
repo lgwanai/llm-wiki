@@ -30,6 +30,7 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 const PDF_EXTENSIONS: &[&str] = &["pdf"];
+const TABLE_EXTENSIONS: &[&str] = &["csv", "tsv", "json", "xlsx", "xls"];
 
 const SKIP_DIR_NAMES: &[&str] = &[
     ".wiki",
@@ -59,6 +60,14 @@ const SENSITIVE_PATTERNS: &[(&str, &str)] = &[
     (r"[\w\.-]+@[\w\.-]+\.\w{2,}", "[REDACTED: Email]"),
 ];
 
+#[derive(Debug, Clone)]
+pub struct CompilePrompt {
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub language: String,
+    pub content_len: usize,
+}
+
 pub fn is_text_source(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -81,7 +90,18 @@ pub fn is_pdf_source(path: &Path) -> bool {
 }
 
 pub fn is_supported_source(path: &Path) -> bool {
-    path.is_file() && (is_text_source(path) || is_image_source(path) || is_pdf_source(path))
+    path.is_file()
+        && (is_text_source(path)
+            || is_image_source(path)
+            || is_pdf_source(path)
+            || is_table_source(path))
+}
+
+pub fn is_table_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| TABLE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 pub fn iter_source_files(root: &Path, max_depth: Option<usize>) -> Vec<PathBuf> {
@@ -321,6 +341,172 @@ pub fn compile_source(
     _force: bool,
     dry_run: bool,
 ) -> WikiResult<CompileResult> {
+    let mut result = CompileResult {
+        source: source.to_string_lossy().to_string(),
+        pages_created: 0,
+        pages_updated: 0,
+        entities_added: 0,
+        edges_added: 0,
+        errors: Vec::new(),
+    };
+
+    if is_table_source(source) {
+        if dry_run {
+            println!(
+                "[DRY-RUN] Would import structured table: {}",
+                source.display()
+            );
+            return Ok(result);
+        }
+        return import_structured_source(source);
+    }
+
+    let raw_content = match read_source_content(source) {
+        Ok(content) => content,
+        Err(e) => {
+            result.errors.push(format!("{e}"));
+            return Ok(result);
+        }
+    };
+    let mut content = if get_config().compile.strip_sensitive {
+        strip_sensitive(&raw_content)
+    } else {
+        raw_content
+    };
+    if !dry_run && is_markdown_source(source) {
+        let mut table_errors = Vec::new();
+        content = table_extract::extract_large_tables_to_links(&content, source, &mut table_errors);
+        result.errors.extend(table_errors);
+    }
+
+    let prompt = match compile_prompt_from_content(source_type, content) {
+        Ok(p) => p,
+        Err(e) => {
+            result.errors.push(format!("{e}"));
+            return Ok(result);
+        }
+    };
+
+    if dry_run {
+        println!("[DRY-RUN] Would compile: {}", source.display());
+        println!(
+            "  Length: {} chars, Language: {}",
+            prompt.content_len, prompt.language
+        );
+        return Ok(result);
+    }
+
+    let response = llm::call_llm_default(&prompt.system_prompt, &prompt.user_prompt)?;
+    apply_compile_response(source, source_type, &response, &prompt.language)
+}
+
+pub fn compile_prompt_for_source(
+    source: &Path,
+    source_type: &SourceType,
+) -> WikiResult<CompilePrompt> {
+    let raw_content = read_source_content(source)?;
+    let mut content = if get_config().compile.strip_sensitive {
+        strip_sensitive(&raw_content)
+    } else {
+        raw_content
+    };
+    if is_markdown_source(source) {
+        let mut table_errors = Vec::new();
+        content = table_extract::extract_large_tables_to_links(&content, source, &mut table_errors);
+        if !table_errors.is_empty() {
+            eprintln!("{}", table_errors.join("\n"));
+        }
+    }
+    compile_prompt_from_content(source_type, content)
+}
+
+fn compile_prompt_from_content(
+    source_type: &SourceType,
+    content: String,
+) -> WikiResult<CompilePrompt> {
+    let lang = llm::detect_language(&content);
+    let (entity_types, focus_description) = ingest_rules(source_type);
+    let (base_system_prompt, user_prompt) = build_compile_prompt(
+        &content,
+        lang,
+        &entity_types,
+        focus_description,
+        source_type,
+    );
+    let system_prompt = with_compile_schema(base_system_prompt);
+    Ok(CompilePrompt {
+        system_prompt,
+        user_prompt,
+        language: lang.to_string(),
+        content_len: content.len(),
+    })
+}
+
+fn is_markdown_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "md" | "markdown" | "mdown"))
+        .unwrap_or(false)
+}
+
+fn import_structured_source(source: &Path) -> WikiResult<CompileResult> {
+    let source_name = source
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let path = source.to_string_lossy();
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let msg = match ext.as_str() {
+        "csv" | "tsv" => crate::ledger::import_csv(&path, Some(&source_name))?,
+        "json" => crate::ledger::import_json(&path, Some(&source_name))?,
+        "xlsx" | "xls" => crate::ledger::import_excel(&path, Some(&source_name))?,
+        _ => {
+            return Err(WikiError::Parse(format!(
+                "Unsupported table source: {}",
+                source.display()
+            )))
+        }
+    };
+    eprintln!("Table imported: {msg}");
+    Ok(CompileResult {
+        source: source.to_string_lossy().to_string(),
+        pages_created: 1,
+        pages_updated: 0,
+        entities_added: 0,
+        edges_added: 0,
+        errors: Vec::new(),
+    })
+}
+
+fn with_compile_schema(system_prompt: String) -> String {
+    let schema = load_compile_schema();
+    format!(
+        "{system_prompt}\n\n## Wiki Schema and Compile Policy\n\
+The following schema is part of the compile contract. Follow it together with the output template above. \
+Use its entity rules, relationship rules, ingest rules, quality standards, privacy rules, and required fields when producing pages.\n\n\
+```markdown\n{schema}\n```"
+    )
+}
+
+fn load_compile_schema() -> String {
+    let schema_path = get_wiki_dir().join("schema.md");
+    std::fs::read_to_string(&schema_path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| include_str!("../templates/schema.md").to_string())
+}
+
+pub fn apply_compile_response(
+    source: &Path,
+    source_type: &SourceType,
+    response: &str,
+    lang: &str,
+) -> WikiResult<CompileResult> {
     let wiki_dir = get_wiki_dir();
     let relative = source.to_string_lossy().to_string();
     let mut result = CompileResult {
@@ -332,37 +518,7 @@ pub fn compile_source(
         errors: Vec::new(),
     };
 
-    let raw_content = match read_source_content(source) {
-        Ok(c) => c,
-        Err(e) => {
-            result.errors.push(format!("{e}"));
-            return Ok(result);
-        }
-    };
-
-    let content = if get_config().compile.strip_sensitive {
-        strip_sensitive(&raw_content)
-    } else {
-        raw_content
-    };
-    let lang = llm::detect_language(&content);
-    let (entity_types, focus_description) = ingest_rules(source_type);
-    let (system_prompt, user_prompt) = build_compile_prompt(
-        &content,
-        lang,
-        &entity_types,
-        focus_description,
-        source_type,
-    );
-
-    if dry_run {
-        println!("[DRY-RUN] Would compile: {}", source.display());
-        println!("  Length: {} chars, Language: {lang}", content.len());
-        return Ok(result);
-    }
-
-    let response = llm::call_llm_default(&system_prompt, &user_prompt)?;
-    let pages = parse_compile_response(&response, lang)?;
+    let pages = parse_compile_response(response, lang)?;
 
     // Dedup: remove pages with duplicate IDs (LLM sometimes outputs same entity twice)
     let mut seen_ids = std::collections::HashSet::new();
@@ -380,6 +536,9 @@ pub fn compile_source(
     // Clone into mutable pages so we can replace tables with links
     let mut final_pages: Vec<crate::compile_parse::ParsedPage> =
         unique_pages.iter().map(|p| (*p).clone()).collect();
+    for page in &mut final_pages {
+        annotate_page_source(page, source, source_type);
+    }
 
     // Extract and store tables from each page body, replace with [[table:xxx]] links
     let mut total_tables = 0usize;
@@ -469,7 +628,7 @@ fn write_wiki_page(
                 if new_c > old_c {
                     merged_fm.insert(k.clone(), serde_json::json!(new_c));
                 }
-            } else if k == "aliases" || k == "keywords" || k == "facts" {
+            } else if k == "aliases" || k == "keywords" || k == "facts" || k == "source_files" {
                 // Merge lists
                 let mut set: std::collections::HashSet<String> = as_string_set(merged_fm.get(k));
                 for item in as_string_set(Some(v)) {
@@ -478,13 +637,27 @@ fn write_wiki_page(
                 let merged: Vec<serde_json::Value> =
                     set.into_iter().map(serde_json::Value::String).collect();
                 merged_fm.insert(k.clone(), serde_json::Value::Array(merged));
+            } else if k == "source_refs" {
+                let merged = merge_source_refs(merged_fm.get(k), v);
+                merged_fm.insert(k.clone(), serde_json::Value::Array(merged));
+            } else if k == "source" {
+                let mut set = as_string_set(merged_fm.get("source_files"));
+                if let Some(s) = merged_fm.get("source").and_then(|x| x.as_str()) {
+                    set.insert(s.to_string());
+                }
+                if let Some(s) = v.as_str() {
+                    set.insert(s.to_string());
+                }
+                let merged: Vec<serde_json::Value> =
+                    set.into_iter().map(serde_json::Value::String).collect();
+                merged_fm.insert("source_files".to_string(), serde_json::Value::Array(merged));
             } else if k != "id" {
                 merged_fm.insert(k.clone(), v.clone());
             }
         }
 
         let merged_fm_str = serde_yaml::to_string(&merged_fm).unwrap_or_default();
-        let merged_body = merge_bodies(&old_body, &page.body);
+        let merged_body = merge_bodies(&old_body, &page.body, &source_label(page));
         let output = format!("---\n{}---\n\n{}", merged_fm_str, merged_body);
         fs::write(&filepath, &output)?;
     } else {
@@ -498,6 +671,43 @@ fn write_wiki_page(
         fs::write(&filepath, &output)?;
     }
     Ok(filepath)
+}
+
+fn annotate_page_source(
+    page: &mut crate::compile_parse::ParsedPage,
+    source: &Path,
+    source_type: &SourceType,
+) {
+    let source_path = source.to_string_lossy().to_string();
+    let source_name = source
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    page.frontmatter.insert(
+        "source".to_string(),
+        serde_json::Value::String(source_path.clone()),
+    );
+    page.frontmatter.insert(
+        "source_name".to_string(),
+        serde_json::Value::String(source_name.clone()),
+    );
+    page.frontmatter.insert(
+        "source_type".to_string(),
+        serde_json::Value::String(source_type.as_str().to_string()),
+    );
+    page.frontmatter.insert(
+        "source_files".to_string(),
+        serde_json::Value::Array(vec![serde_json::Value::String(source_path.clone())]),
+    );
+    page.frontmatter.insert(
+        "source_refs".to_string(),
+        serde_json::Value::Array(vec![serde_json::json!({
+            "path": source_path,
+            "name": source_name,
+            "type": source_type.as_str(),
+        })]),
+    );
 }
 
 /// Split a page into (frontmatter_json, body_string).
@@ -543,20 +753,225 @@ fn as_string_set(val: Option<&serde_json::Value>) -> std::collections::HashSet<S
     set
 }
 
-/// Merge bodies: keep old content, only append new sections that don't already appear.
-fn merge_bodies(old_body: &str, new_body: &str) -> String {
+fn merge_source_refs(
+    old: Option<&serde_json::Value>,
+    new: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut refs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for value in old.into_iter().chain(std::iter::once(new)) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    push_unique_source_ref(item.clone(), &mut refs, &mut seen);
+                }
+            }
+            serde_json::Value::String(s) => {
+                push_unique_source_ref(
+                    serde_json::json!({ "path": s, "name": s }),
+                    &mut refs,
+                    &mut seen,
+                );
+            }
+            serde_json::Value::Object(_) => {
+                push_unique_source_ref(value.clone(), &mut refs, &mut seen);
+            }
+            _ => {}
+        }
+    }
+    refs
+}
+
+fn push_unique_source_ref(
+    value: serde_json::Value,
+    refs: &mut Vec<serde_json::Value>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let key = value
+        .get("path")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("name").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| value.to_string());
+    if seen.insert(key) {
+        refs.push(value);
+    }
+}
+
+fn source_label(page: &crate::compile_parse::ParsedPage) -> String {
+    page.frontmatter
+        .get("source")
+        .and_then(|v| v.as_str())
+        .or_else(|| page.frontmatter.get("source_name").and_then(|v| v.as_str()))
+        .unwrap_or("unknown-source")
+        .to_string()
+}
+
+/// Merge bodies by section and fuse similar lines instead of appending whole duplicate blocks.
+fn merge_bodies(old_body: &str, new_body: &str, source: &str) -> String {
     let old = old_body.trim();
     let new = new_body.trim();
-    // If new contains old (re-compile yielded same content), return new as authoritative
-    if new.contains(old) {
+    if old == new {
         return new.to_string();
     }
     // If old already contains new, no change needed
     if old.contains(new) {
         return old.to_string();
     }
-    // Otherwise append with separator
-    format!("{old}\n\n<!-- merged -->\n\n{new}")
+    if old.contains(&format!("<!-- source-ref:{source} -->")) {
+        return old.to_string();
+    }
+    merge_body_sections(old, new)
+}
+
+fn merge_body_sections(left: &str, right: &str) -> String {
+    let mut sections = split_body_sections(left);
+    for (heading, lines) in split_body_sections(right) {
+        let entry = sections.entry(heading).or_default();
+        for line in lines {
+            insert_fused_body_line(entry, line);
+        }
+    }
+    render_body_sections(sections)
+}
+
+fn split_body_sections(body: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut sections = std::collections::BTreeMap::new();
+    let mut current = "概述".to_string();
+    for raw in clean_merge_artifacts(body).lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(heading) = canonical_body_heading(line) {
+            current = heading;
+            sections.entry(current.clone()).or_insert_with(Vec::new);
+            continue;
+        }
+        insert_fused_body_line(
+            sections.entry(current.clone()).or_insert_with(Vec::new),
+            line.to_string(),
+        );
+    }
+    sections
+}
+
+fn canonical_body_heading(line: &str) -> Option<String> {
+    let trimmed = line.trim().trim_start_matches('#').trim();
+    match trimmed {
+        "概述" | "Overview" | "Summary" => Some("概述".into()),
+        "关键细节" | "Details" | "Key Details" => Some("关键细节".into()),
+        "关系" | "Relationships" => Some("关系".into()),
+        "来源" | "Source" | "Sources" => Some("来源".into()),
+        "Source-Specific Notes" => None,
+        _ if line.starts_with('#') => Some(trimmed.to_string()),
+        _ => None,
+    }
+}
+
+fn render_body_sections(sections: std::collections::BTreeMap<String, Vec<String>>) -> String {
+    let order = ["概述", "关键细节", "关系", "来源"];
+    let mut out = String::new();
+    let mut rendered = std::collections::HashSet::new();
+    for heading in order {
+        if let Some(lines) = sections.get(heading) {
+            push_body_section(&mut out, heading, lines);
+            rendered.insert(heading.to_string());
+        }
+    }
+    for (heading, lines) in sections {
+        if !rendered.contains(&heading) {
+            push_body_section(&mut out, &heading, &lines);
+        }
+    }
+    out.trim().to_string()
+}
+
+fn push_body_section(out: &mut String, heading: &str, lines: &[String]) {
+    let lines: Vec<_> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(heading);
+    out.push_str("\n\n");
+    out.push_str(
+        &lines
+            .into_iter()
+            .map(|l| l.trim().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+fn insert_fused_body_line(lines: &mut Vec<String>, candidate: String) {
+    let candidate_norm = normalize_body_line(&candidate);
+    if candidate_norm.is_empty() {
+        return;
+    }
+    for existing in lines.iter_mut() {
+        let existing_norm = normalize_body_line(existing);
+        if existing_norm == candidate_norm || similar_body_line(&existing_norm, &candidate_norm) {
+            if candidate.chars().count() > existing.chars().count() {
+                *existing = candidate;
+            }
+            return;
+        }
+    }
+    lines.push(candidate);
+}
+
+fn clean_merge_artifacts(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("<!-- merged")
+                && !trimmed.starts_with("<!-- source-ref:")
+                && !trimmed.starts_with("_Source:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_body_line(line: &str) -> String {
+    line.to_lowercase()
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace()
+                && !c.is_ascii_punctuation()
+                && !"，。；：、“”‘’（）【】《》—".contains(*c)
+        })
+        .collect()
+}
+
+fn similar_body_line(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a.contains(b) || b.contains(a) {
+        return true;
+    }
+    let grams_a = body_bigrams(a);
+    let grams_b = body_bigrams(b);
+    if grams_a.is_empty() || grams_b.is_empty() {
+        return false;
+    }
+    let intersection = grams_a.intersection(&grams_b).count() as f64;
+    let union = grams_a.union(&grams_b).count() as f64;
+    intersection / union >= 0.42
+}
+
+fn body_bigrams(text: &str) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 2 {
+        return chars.into_iter().map(|c| c.to_string()).collect();
+    }
+    chars
+        .windows(2)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
 }
 
 fn update_index(wiki_dir: &Path) -> WikiResult<()> {
@@ -659,5 +1074,29 @@ mod tests {
     fn test_is_pdf_source() {
         assert!(is_pdf_source(Path::new("test.pdf")));
         assert!(!is_pdf_source(Path::new("test.md")));
+    }
+
+    #[test]
+    fn test_merge_bodies_fuses_sections_without_append_markers() {
+        let merged = merge_bodies(
+            "概述\n\nAI 最佳实践强调人工审核和合规检查。\n\n关键细节\n\n人工审核：所有 AI 产出物必须经过人工审核。",
+            "概述\n\nAI 最佳实践强调人工审核、合规检查和质量把控。\n\n关键细节\n\n合规检查：建立合规检查清单。",
+            "clients/acme.md",
+        );
+        assert!(merged.contains("人工审核"));
+        assert!(merged.contains("合规检查"));
+        assert!(!merged.contains("Source-Specific Notes"));
+        assert!(!merged.contains("source-ref"));
+    }
+
+    #[test]
+    fn test_merge_source_refs_deduplicates_by_path() {
+        let old = serde_json::json!([{ "path": "a.md", "name": "a.md" }]);
+        let new = serde_json::json!([
+            { "path": "a.md", "name": "a copy.md" },
+            { "path": "b.md", "name": "b.md" }
+        ]);
+        let merged = merge_source_refs(Some(&old), &new);
+        assert_eq!(merged.len(), 2);
     }
 }

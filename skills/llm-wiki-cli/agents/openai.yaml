@@ -1,4 +1,4 @@
 interface:
   display_name: "LLM Wiki CLI"
   short_description: "Operate llm-wiki through its CLI"
-  default_prompt: "Use $llm-wiki-cli to configure OCR and compile documents into my wiki."
+  default_prompt: "Use $llm-wiki-cli to configure OCR and compile documents into my wiki with the default Agent-powered compile mode."

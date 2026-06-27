@@ -8,7 +8,9 @@ use clap::Parser;
 
 use llm_wiki_core::cli::{Cli, Commands};
 use llm_wiki_core::config;
-use llm_wiki_core::error::WikiResult;
+use llm_wiki_core::error::{WikiError, WikiResult};
+
+const SKILL_AGENT_ENV: &str = "LLM_WIKI_SKILL_AGENT";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -26,6 +28,16 @@ fn main() {
             depth,
             jobs,
         } => cmd_compile(source, source_type, force, dry_run, depth, jobs),
+        Commands::CompilePrompt {
+            source,
+            source_type,
+        } => cmd_compile_prompt(source, source_type),
+        Commands::CompileIngest {
+            source,
+            source_type,
+            response,
+            lang,
+        } => cmd_compile_ingest(source, source_type, response, lang),
         Commands::Query {
             question,
             file_back,
@@ -33,6 +45,11 @@ fn main() {
             no_synthesis,
             debug_search,
         } => cmd_query(question, file_back, format, !no_synthesis, debug_search),
+        Commands::Dream {
+            foreground,
+            auto,
+            worker,
+        } => cmd_dream(foreground, auto, worker),
         Commands::Search { cmd } => cmd_search(cmd),
         Commands::Benchmark {
             file,
@@ -166,11 +183,13 @@ fn cmd_compile(
     jobs: Option<usize>,
 ) -> WikiResult<()> {
     use llm_wiki_core::compile;
+    use llm_wiki_core::dream;
     use llm_wiki_core::types::SourceType;
 
+    dream::cancel_active_dream("compile started");
     let source_path = std::path::Path::new(&source);
     let st = SourceType::from_str(&source_type);
-    let max_jobs = jobs.unwrap_or(1).min(4);
+    let _max_jobs = jobs.unwrap_or(1).min(4);
 
     if source_path.is_dir() {
         let files = compile::iter_source_files(source_path, depth);
@@ -197,6 +216,96 @@ fn cmd_compile(
     Ok(())
 }
 
+fn cmd_compile_prompt(source: String, source_type: String) -> WikiResult<()> {
+    use llm_wiki_core::compile;
+    use llm_wiki_core::dream;
+    use llm_wiki_core::types::SourceType;
+
+    ensure_skill_agent_mode()?;
+    dream::cancel_active_dream("compile-prompt started");
+
+    let source_path = std::path::Path::new(&source);
+    let st = SourceType::from_str(&source_type);
+    if compile::is_table_source(source_path) {
+        let result = compile::compile_source(source_path, &st, true, false)?;
+        for err in &result.errors {
+            eprintln!("Error: {err}");
+        }
+        println!("---TABLE IMPORT---");
+        println!("source: {}", result.source);
+        println!("tables_created: {}", result.pages_created);
+        println!("skip_agent: true");
+        println!("---METADATA---");
+        println!("language: table");
+        println!("content_chars: 0");
+        return Ok(());
+    }
+
+    let prompt = compile::compile_prompt_for_source(source_path, &st)?;
+    println!("---SYSTEM PROMPT---");
+    println!("{}", prompt.system_prompt);
+    println!("---USER PROMPT---");
+    println!("{}", prompt.user_prompt);
+    println!("---METADATA---");
+    println!("language: {}", prompt.language);
+    println!("content_chars: {}", prompt.content_len);
+    Ok(())
+}
+
+fn cmd_compile_ingest(
+    source: String,
+    source_type: String,
+    response: Option<String>,
+    lang: String,
+) -> WikiResult<()> {
+    use llm_wiki_core::compile;
+    use llm_wiki_core::dream;
+    use llm_wiki_core::types::SourceType;
+    use std::io::Read;
+
+    ensure_skill_agent_mode()?;
+    dream::cancel_active_dream("compile-ingest started");
+
+    let source_path = std::path::Path::new(&source);
+    let st = SourceType::from_str(&source_type);
+    if compile::is_table_source(source_path) {
+        let result = compile::compile_source(source_path, &st, true, false)?;
+        for err in &result.errors {
+            eprintln!("Error: {err}");
+        }
+        println!(
+            "Imported table source: {} tables created",
+            result.pages_created
+        );
+        return Ok(());
+    }
+
+    let response_text = if let Some(path) = response {
+        std::fs::read_to_string(path)?
+    } else {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        input
+    };
+
+    let result = compile::apply_compile_response(source_path, &st, &response_text, &lang)?;
+    for err in &result.errors {
+        eprintln!("Error: {err}");
+    }
+    println!("Compiled: {} pages created", result.pages_created);
+    Ok(())
+}
+
+fn ensure_skill_agent_mode() -> WikiResult<()> {
+    match std::env::var(SKILL_AGENT_ENV).as_deref() {
+        Ok("1") | Ok("true") | Ok("yes") => Ok(()),
+        _ => Err(WikiError::Config(format!(
+            "Agent-powered compile is only available inside the llm-wiki skill. \
+             Configure a model for app/CLI usage, or invoke through the skill with {SKILL_AGENT_ENV}=1."
+        ))),
+    }
+}
+
 fn cmd_query(
     question: String,
     _file_back: bool,
@@ -204,8 +313,13 @@ fn cmd_query(
     synthesis: bool,
     debug_search: bool,
 ) -> WikiResult<()> {
+    use llm_wiki_core::dream;
     use llm_wiki_core::query;
+    dream::cancel_active_dream("query started");
     let result = query::query_wiki(&question, synthesis, &format, debug_search)?;
+    if let Err(e) = dream::log_query(&result, synthesis) {
+        eprintln!("Query log error: {e}");
+    }
     println!("{}", result.answer);
     if debug_search {
         if let Some(dbg) = &result.debug_search {
@@ -215,6 +329,17 @@ fn cmd_query(
             );
         }
     }
+    Ok(())
+}
+
+fn cmd_dream(foreground: bool, auto: bool, worker: bool) -> WikiResult<()> {
+    use llm_wiki_core::dream::{self, DreamOptions};
+    let msg = dream::start_dream(DreamOptions {
+        foreground,
+        worker,
+        auto,
+    })?;
+    println!("{msg}");
     Ok(())
 }
 
@@ -339,7 +464,22 @@ fn cmd_ledger(cmd: llm_wiki_core::cli::LedgerCmd) -> WikiResult<()> {
             }
         }
         LedgerCmd::Import { file, name } => {
-            let t = ledger::import_csv(&file, name.as_deref())?;
+            let path = std::path::Path::new(&file);
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let t = match ext.as_str() {
+                "csv" | "tsv" => ledger::import_csv(&file, name.as_deref())?,
+                "json" => ledger::import_json(&file, name.as_deref())?,
+                "xlsx" | "xls" => ledger::import_excel(&file, name.as_deref())?,
+                _ => {
+                    return Err(WikiError::Parse(format!(
+                        "Unsupported import file type: {file}. Supported: csv, tsv, json, xlsx, xls"
+                    )))
+                }
+            };
             println!("Imported to table: {t}");
         }
         LedgerCmd::Sql { sql_text } => {
